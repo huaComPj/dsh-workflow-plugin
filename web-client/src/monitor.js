@@ -12,36 +12,40 @@ import { EDITOR_STYLES } from './styles.js'
 
 const POLL_INTERVAL_MS = 2000
 
+const MONITOR_TEXT = 'var(--dsw-alias-label-primary, currentColor)'
+const MONITOR_MUTED = 'var(--dsw-alias-label-secondary, currentColor)'
+const MONITOR_ACCENT_TEXT = `color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 55%, ${MONITOR_TEXT})`
+
 export const MONITOR_STYLES = `
 /* #282 主题契约：正文/次要文字/边框取宿主 --dsw-alias-* 语义色（浅色由 body、深色由 body[data-ds-dark-theme] 定义），
    兜底写 currentColor；状态色由宿主状态语义色与正文色混合，浅深两套都保持 >=4.5:1，不再依赖宿主未定义的
    --dsh-text/#ddd 浅灰兜底，也不只按操作系统偏好换色。 */
-.wf-monitor { font-size: 13px; color: var(--dsw-alias-label-primary, currentColor); padding: 8px; display: flex; flex-direction: column; gap: 8px; }
-.wf-monitor-banner { background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 16%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 55%, transparent); color: var(--dsw-alias-label-primary, currentColor); padding: 6px 8px; border-radius: 6px; }
+.wf-monitor { font-size: 13px; color: ${MONITOR_TEXT}; padding: 8px; display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow-y: auto; gap: 8px; }
+.wf-monitor-banner { background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 16%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 55%, transparent); color: ${MONITOR_TEXT}; padding: 6px 8px; border-radius: 6px; }
 .wf-monitor-status { font-weight: 600; }
-.wf-monitor-status.run-blocked { color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 60%, var(--dsw-alias-label-primary, currentColor)); }
-.wf-monitor-status.run-ok { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 45%, var(--dsw-alias-label-primary, currentColor)); }
-.wf-monitor-muted { color: var(--dsw-alias-label-secondary, currentColor); }
+.wf-monitor-status.run-blocked { color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 60%, ${MONITOR_TEXT}); }
+.wf-monitor-status.run-ok { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 45%, ${MONITOR_TEXT}); }
+.wf-monitor-muted { color: ${MONITOR_MUTED}; }
 /* #282 顶部两行摘要：状态+业务返回 / 工作流+耗时；「自动刷新已停止」只占状态旁的简短提示。 */
 .wf-monitor-summary { display: flex; flex-direction: column; gap: 2px; }
 .wf-monitor-summary-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
-.wf-monitor-return-value { color: var(--dsw-alias-label-secondary, currentColor); }
-.wf-monitor-terminal-note { margin-left: auto; color: var(--dsw-alias-label-secondary, currentColor); font-size: 12px; }
+.wf-monitor-return-value { color: ${MONITOR_MUTED}; }
+.wf-monitor-terminal-note { margin-left: auto; color: ${MONITOR_MUTED}; font-size: 12px; }
 /* #282 运行详情默认收起：原生 details/summary 保留键盘与 aria-expanded 语义。 */
 .wf-monitor-details { display: flex; flex-direction: column; gap: 2px; }
-.wf-monitor-details > summary { cursor: pointer; font-weight: 600; color: var(--dsw-alias-label-primary, currentColor); }
+.wf-monitor-details > summary { cursor: pointer; font-weight: 600; color: ${MONITOR_TEXT}; }
 .wf-monitor-details > summary:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, currentColor); outline-offset: 2px; }
-.wf-monitor-details-body { display: flex; flex-direction: column; gap: 2px; padding-top: 2px; color: var(--dsw-alias-label-secondary, currentColor); font-size: 12px; overflow-wrap: anywhere; }
+.wf-monitor-details-body { display: flex; flex-direction: column; gap: 2px; padding-top: 2px; color: ${MONITOR_MUTED}; font-size: 12px; overflow-wrap: anywhere; }
 .wf-monitor-prompt { white-space: pre-wrap; background: rgba(128,128,128,0.12); border-radius: 6px; padding: 6px 8px; }
 .wf-monitor-nodes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .wf-monitor-node { display: flex; gap: 6px; align-items: baseline; padding: 3px 6px; border-radius: 4px; }
 .wf-monitor-node.wf-node-current { background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 18%, transparent); }
-.wf-node-phase.phase-working { color: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #f59e0b) 45%, var(--dsw-alias-label-primary, currentColor)); }
-.wf-node-phase.phase-checking { color: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 55%, var(--dsw-alias-label-primary, currentColor)); }
-.wf-node-phase.phase-settling { color: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 55%, var(--dsw-alias-label-primary, currentColor)); }
-.wf-node-phase.phase-exited { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 45%, var(--dsw-alias-label-primary, currentColor)); }
-.wf-node-phase.phase-ready { color: var(--dsw-alias-label-secondary, currentColor); }
-.wf-node-block { color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 60%, var(--dsw-alias-label-primary, currentColor)); font-weight: 600; }
+.wf-node-phase.phase-working { color: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #f59e0b) 45%, ${MONITOR_TEXT}); }
+.wf-node-phase.phase-checking { color: ${MONITOR_ACCENT_TEXT}; }
+.wf-node-phase.phase-settling { color: ${MONITOR_ACCENT_TEXT}; }
+.wf-node-phase.phase-exited { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 45%, ${MONITOR_TEXT}); }
+.wf-node-phase.phase-ready { color: ${MONITOR_MUTED}; }
+.wf-node-block { color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 60%, ${MONITOR_TEXT}); font-weight: 600; }
 /* #252 运行图：复用配置编辑器画布样式，只读展示；侧栏里给固定高度并允许缩放/平移。 */
 .wf-monitor-graph { display: flex; flex-direction: column; gap: 4px; }
 /* #282 图默认高度适中：0,4,0 特异度压过共享编辑器 @container 的 460px 覆盖（窄侧栏下曾长期挤占首屏）。 */
@@ -62,13 +66,13 @@ export const MONITOR_STYLES = `
 .wf-monitor-viewtools { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; font-size: 12px; }
 .wf-monitor-viewtools button { padding: 3px 8px; font-size: 12px; }
 /* #282 选中态取宿主 business 语义色（文字 55% 混正文色，两种主题都 >=4.5:1）。 */
-.wf-monitor-flowtabs button[aria-selected="true"] { border-color: var(--dsw-alias-state-business-primary, currentColor); color: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 55%, var(--dsw-alias-label-primary, currentColor)); background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 14%, transparent); }
+.wf-monitor-flowtabs button[aria-selected="true"] { border-color: var(--dsw-alias-state-business-primary, currentColor); color: ${MONITOR_ACCENT_TEXT}; background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 14%, transparent); }
 /* #253 子流程下钻：面包屑导航 + 暂停跟随后的「回到当前节点」入口。 */
 .wf-monitor-breadcrumb { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; font-size: 12px; }
 .wf-monitor-breadcrumb button { padding: 2px 6px; font-size: 12px; border: 1px solid transparent; background: transparent; color: inherit; }
-.wf-monitor-breadcrumb button.is-current { border-color: var(--dsw-alias-state-business-primary, currentColor); color: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 55%, var(--dsw-alias-label-primary, currentColor)); background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 14%, transparent); }
+.wf-monitor-breadcrumb button.is-current { border-color: var(--dsw-alias-state-business-primary, currentColor); color: ${MONITOR_ACCENT_TEXT}; background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 14%, transparent); }
 .wf-monitor-sep { opacity: 0.6; }
-.wf-monitor-return { align-self: flex-start; padding: 3px 8px; font-size: 12px; border-color: var(--dsw-alias-state-business-primary, currentColor); color: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 55%, var(--dsw-alias-label-primary, currentColor)); }
+.wf-monitor-return { align-self: flex-start; padding: 3px 8px; font-size: 12px; border-color: var(--dsw-alias-state-business-primary, currentColor); color: ${MONITOR_ACCENT_TEXT}; }
 /* #254 多 Run 切换器 / 空态 / 终态提示。 */
 .wf-monitor-switcher { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .wf-monitor-switcher select { max-width: 100%; padding: 2px 4px; font-size: 12px; }
@@ -78,14 +82,14 @@ export const MONITOR_STYLES = `
 .wf-monitor-toolbar { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
 .wf-monitor-refresh { padding: 2px 8px; font-size: 12px; }
 /* #274 当前执行卡：图下独立区块，一眼看清谁在干活、用什么模型、来源阶段。 */
-.wf-monitor-current { display: flex; flex-direction: column; gap: 4px; background: color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 6%, transparent); border-left: 3px solid var(--dsw-alias-state-business-primary, #4176e6); border-radius: 6px; padding: 8px; }
-.wf-monitor-current.is-terminal { border-left-color: var(--dsw-alias-label-secondary, currentColor); }
+.wf-monitor-current { display: flex; flex-direction: column; gap: 4px; background: color-mix(in srgb, ${MONITOR_TEXT} 6%, transparent); border-left: 3px solid var(--dsw-alias-state-business-primary, #4176e6); border-radius: 6px; padding: 8px; }
+.wf-monitor-current.is-terminal { border-left-color: ${MONITOR_MUTED}; }
 .wf-monitor-card-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .wf-monitor-card-title { font-size: 14px; }
 .wf-monitor-card-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.wf-monitor-card-role { min-width: 96px; color: var(--dsw-alias-label-secondary, currentColor); }
+.wf-monitor-card-role { min-width: 96px; color: ${MONITOR_MUTED}; }
 .wf-monitor-card-state { font-weight: 600; }
-.wf-monitor-card-terminal { color: var(--dsw-alias-label-primary, currentColor); font-weight: 600; }
+.wf-monitor-card-terminal { color: ${MONITOR_TEXT}; font-weight: 600; }
 /* #275 执行记录表：固定列序，表头吸顶、节点/流程两列吸附左侧，横向滚动不丢失行身份。
    #282 去掉独立纵向限高：整栏只有一条主滚动条，记录不再被困在 360px 内层滚动区里。 */
 .wf-monitor-records { display: flex; flex-direction: column; gap: 4px; }
@@ -375,10 +379,7 @@ export function WorkflowMonitorTab({ fetchStatus, visible = true, scope }) {
   const flow = graph === null
     ? null
     : graph.flows.find(item => item.id === followView.activeFlowId) ?? graph.flows.find(item => item.id === currentFlowId) ?? graph.flows[0] ?? null
-  return h('div', { className: 'wf-monitor' },
-    styleEl,
-    bannerEl,
-    toolbarEl,
+  return frame(
     // #282 顶部两行摘要：状态+业务返回值 / 工作流名称+总耗时；终态只留状态旁的简短提示。
     h('div', { className: 'wf-monitor-summary' },
       h('div', { className: 'wf-monitor-summary-row' },

@@ -1,18 +1,19 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { bundleSources } from '../web-client/build.mjs'
 
 /**
  * #282 监控面板展示契约：主题色、记录表滚动、运行图高度。
  * 这些是纯 CSS 事实（无 DOM 可测），直接断言内联样式表文本；行为侧断言在 monitor-poll-lifecycle。
  */
 function monitorStyles(): string {
-  const source = readFileSync(new URL('../web-client/src/monitor.js', import.meta.url), 'utf8')
-  const start = source.indexOf('export const MONITOR_STYLES')
-  const end = source.indexOf('export function useMonitorPolling')
-  assert.ok(start >= 0 && end > start, 'monitor.js 里应能找到内联样式表')
+  // 执行真实打包转换后的模块，只取样式值：声明顺序和相邻函数不会扩大扫描范围。
+  // 依赖仅在组件调用时使用；这里不挂载 React，也不复制 import/export 转换规则。
+  const styles = new Function('require', '__monitorView', '__graphCanvas', '__styles',
+    `${bundleSources().monitor}\nreturn MONITOR_STYLES;`)(() => ({}), {}, {}, {})
+  assert.equal(typeof styles, 'string')
   // 去掉注释：注释里会说明「不再用 --dsh-text/#ddd」，不是样式规则本身。
-  return source.slice(start, end).replace(/\/\*[\s\S]*?\*\//g, '')
+  return styles.replace(/\/\*[\s\S]*?\*\//g, '')
 }
 
 test('#282 主题契约：改用宿主 --dsw-alias-* 语义色，不再依赖未定义的 --dsh-* 与 #ddd 兜底', () => {
@@ -29,6 +30,14 @@ test('#282 主题契约：改用宿主 --dsw-alias-* 语义色，不再依赖未
   assert.doesNotMatch(styles, /color: (#9fc8ff|#ffb4b4|#9fdca4|#ffd479|#c9a6ff|#1d4ed8)\b/i)
   // 共享画布在监控内跟随主题（独立编辑器面板不受影响，选择器限定在 .wf-monitor-graph 下）。
   assert.match(styles, /\.wf-monitor-graph \.wf-editor\.wf-monitor-canvas \{[^}]*--wf-text: var\(--dsw-alias-label-primary/)
+})
+
+test('#282 监控根容器在受限侧栏内收缩并承担整栏纵向滚动', () => {
+  const styles = monitorStyles()
+  const rule = /\.wf-monitor \{[^}]*\}/.exec(styles)?.[0] ?? ''
+  assert.match(rule, /flex: 1 1 auto/, '根容器应占满宿主 tab 的可用高度')
+  assert.match(rule, /min-height: 0/, '允许根容器小于内容高度，避免被宿主 tabBody 裁切')
+  assert.match(rule, /overflow-y: auto/, '整栏主滚动由根容器承接，不依赖被裁切隔断的外层滚动')
 })
 
 test('#282 执行记录表只保留横向滚动，不再有独立限高的纵向滚动区', () => {
