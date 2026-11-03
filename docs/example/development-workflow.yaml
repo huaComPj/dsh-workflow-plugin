@@ -1,0 +1,114 @@
+# 入门：澄清并建 Issue → 开发 → 审查 → 测试 → 人工确认合并。
+schemaVersion: agent-workflow/v3
+actorCommonPersona: |
+  只处理本次授权的 GitHub 单仓、单 Issue、单 PR；保护用户已有改动，只提交任务内容。禁止强推、绕过分支保护、删除分支、发布或部署。
+  交接传仓库、Issue/PR URL、任务/目标分支、确切 base/head SHA 与证据链接。重入先查真实结果，复用已成功操作；操作结果未知、权限/环境障碍或范围争议时暂停交 Manager，不盲目重复写入。
+roles:
+  developer:
+    persona: 按确认的 Issue 做最小完整实现，补必要测试并自检；返工复用任务分支和 PR，不合并或关闭 Issue。
+  reviewer:
+    persona: 独立审查需求符合性、正确性、安全性和项目规范；不修改代码，提供具体可执行的必修项。
+  tester:
+    persona: 独立执行测试与 Issue 验收，记录真实命令、结果和未测边界；不修改代码，不把环境障碍当产品缺陷。
+judgeRole:
+  persona: 只读核验当前结果的冻结 criteria 与事实；不代执行者完成任务，不重新制定验收要求。事实支持则 ACCEPT，明确不符则 REJECT，必要信息不足则 NEED_CONTEXT。
+workflow:
+  startNode: create-issue
+  nodes:
+    create-issue:
+      execution:
+        type: actor-task
+        role: manager
+        instruction: |
+          逐轮澄清用户需求、范围和可验证验收条件：每轮问当前可决策的问题并给建议，环境事实自行调查，直到用户明确确认理解一致。
+          核对 GitHub 仓库、默认分支、工作区已有改动及创建分支/提交/推送/PR的授权；将确认的规格和不做范围创建为唯一 Issue并交接，重入复用已建票，不另建票。
+      checker:
+        checkerId: judge.claim-correct
+        config: {}
+      results:
+        ready:
+          criteria: 用户已明确确认规格、范围、验收与开发远端操作授权；唯一开放 Issue 已创建且内容一致，仓库/默认分支明确，已有改动的保护边界已记录；handoff 可定位 Issue 和上述决定。
+          target:
+            node: implement
+    implement:
+      execution:
+        type: actor-task
+        role: developer
+        instruction: |
+          从已核对的远端默认分支创建任务分支，按 Issue 做最小完整实现并补必要回归、自测和自检审查；返工处理上游必修项，复用同一分支与 PR，不制造空提交。
+          完成适用检查后提交、推送并创建或更新到默认分支的唯一 PR，在 Issue 留实现与检查证据，交接 PR 的 base/head SHA；必需验证受阻时暂停，不冒充通过。
+      checker:
+        checkerId: judge.claim-correct
+        config: {}
+      results:
+        implemented:
+          criteria: 任务分支起点可追溯到默认分支，最小实现及必要测试已提交推送到唯一 PR；无无关用户改动，适用自测有真实结果或不适用依据，返工项已处理；Issue 证据与当前 PR base/head 一致且已交接。
+          target:
+            node: review
+    review:
+      execution:
+        type: actor-task
+        role: reviewer
+        instruction: |
+          固定当前 PR 的 base/head SHA，独立阅读完整改动及关联代码，核对 Issue、项目规范、正确性、安全性和不必要的复杂度，并复核旧必修项。
+          在 Issue 记录绑定修订的结论与依据：通过交测试，具体产品必修项交开发；检查结束修订变化用 stale 返回开发重验，权限/环境或范围障碍暂停。
+      checker:
+        checkerId: judge.claim-correct
+        config: {}
+      results:
+        approved:
+          criteria: 完整改动及 Issue 验收已独立审查，无未解决必修项；Issue 审查证据绑定确切 base/head 且当前 PR 未变化，handoff 含审查链接及修订。
+          target:
+            node: test
+        changes-required:
+          criteria: Issue 已记录针对当前 PR 的具体产品缺陷、依据与修复验收要求；非环境或权限问题，handoff 提供可执行必修清单。
+          target:
+            node: implement
+        stale:
+          criteria: 有可核验事实证明 PR 修订已改变，本轮结论不能覆盖新候选；handoff 记录新旧修订及重新验证要求。
+          target:
+            node: implement
+    test:
+      execution:
+        type: actor-task
+        role: tester
+        instruction: |
+          对审查通过的确切 PR base/head 独立执行项目检查并逐项验证 Issue 验收，记录命令、结果与未测边界，不修改代码。
+          在 Issue 发布测试证据并交接审查链接：全部满足才交合并，产品缺陷回开发；候选修订变化用 stale 回开发重走审查测试，必需环境/权限缺失则暂停。
+      checker:
+        checkerId: judge.claim-correct
+        config: {}
+      results:
+        passed:
+          criteria: 适用项目检查及 Issue 验收均有独立真实通过证据，不适用项有明确依据，无缺失必需验证；测试与审查对应同一 base/head 且当前 PR 未变，handoff 含两类证据链接及修订。
+          target:
+            node: merge
+        changes-required:
+          criteria: 有可复现的产品缺陷或验收不满足证据，Issue 已记录修复要求，非环境权限障碍；handoff 可供开发修复。
+          target:
+            node: implement
+        stale:
+          criteria: 当前 PR base/head 与已审查候选不同，有新旧修订证据；handoff 明确旧审查测试不覆盖新候选，需重验。
+          target:
+            node: implement
+    merge:
+      execution:
+        type: actor-task
+        role: manager
+        instruction: |
+          向用户展示 PR、已审查测试的 base/head 与证据，取得绑定该候选的明确合并确认；紧邻操作再核对修订、必需检查及仓库保护，修订变化用 stale 回开发重验，冲突/权限或不支持 squash 时暂停，不绕过限制。
+          使用 head 条件保护 squash 合入默认分支，核验实际合并结果后关闭关联 Issue并记录交付；不删除分支、不部署，重入先查询已合并/关票结果，未知则暂停，不能重复合并。
+      checker:
+        checkerId: judge.claim-correct
+        config: {}
+      results:
+        delivered:
+          criteria: 用户明确批准了已审查测试的候选，指定 PR 已以 squash 合入默认分支且实际源 head 和合并起点与批准候选相符，目标包含合并提交；Issue 已关闭并有交付证据，未绕过保护、删除分支或部署。
+          target:
+            return: delivered
+        stale:
+          criteria: 合并尚未执行，PR base/head 与已批准审查测试候选不同；交接新旧修订并明确旧批准失效，返回开发后必须重走审查测试和人工确认。
+          target:
+            node: implement
+  returns:
+    - delivered

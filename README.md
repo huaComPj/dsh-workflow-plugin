@@ -1,117 +1,76 @@
-# dsh-agent-team-workflow（DSH 团队工作流插件）
+# DSH 团队工作流插件
 
-DSH Agent-Team Workflow plugin — configurable serial Agent/Subagent team
-workflows (`agent-workflow/v3`).
+**让 AI 团队按流程交付，而不只是轮流回答。**
 
-**当前状态：T1–T9 的 Node Execution Runtime 重构已实现、审查并合入 `main`，A01–A30 自动化验收账本见 [`docs/testing/node-execution-runtime-acceptance.md`](docs/testing/node-execution-runtime-acceptance.md)；本仓库不自动部署——部署是需用户显式授权的独立动作（见「Installation」）。验收基线宿主为 DSH `0.2.0-rc.2`（对齐记录见根目录 `AGENTS.md`；0.2.0 迁移见 milestone `dsh-020-migration` / #185：devDeps 即宿主类型源，orphan 判定按新 jobs 事件语义三重匹配，FORMAT V3 存量冷读由 `test/session-format-cold-read.test.ts` 覆盖）。**兼容声明（#207 发布前决策）：需要 DSH 宿主 `>= 0.2.1-rc.2`（下限范围，包元数据 `engines.dsh`、本总览与用户手册三处统一表述；验收基线为 exact `0.2.1-rc.2`）。**现行验收入口是一条命令 `pnpm run verify`（typecheck + 全量 suite + 两套受控 smoke），逐项口径见 [`docs/testing/runtime-refact-test-migration.md`](docs/testing/runtime-refact-test-migration.md)。**
-三表闭环已接通同 execution 的 REJECT/NEED_CONTEXT、Manager 定向 resume/Judge respawn、争议协议、Manager-only 有界历史，以及关闭重开后的统一恢复。Role Actor 在新 visit（含自环）前安全收口并 compact 后续接同一 continuable Session；同 execution 返工/resume 不做 Node 边界 compact，持久 Session 确认不存在时由 fresh replacement 接手完整材料。
+中文 · [English](<README.en.md>)
 
-受控 Runtime/SQLite smoke 与 exact DSH `0.2.0-rc.2` 真实 Host 组合分开报告：[`A01–A30 验收账本`](docs/testing/node-execution-runtime-acceptance.md)记录 Role Activation cold continuation、真实 Basic compaction、ToolRuntime claim/Judge 与 Host interrupt 后同 execution BLOCK/resume。脚本 LLM 不代表外部模型质量，Activation cold 也不冒充完整进程重启。
+`dsh-agent-team-workflow` 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供可配置的串行团队工作流：Manager 协调任务，角色 Agent 分工执行，独立 Judge 核验结果，再进入下一步。
 
-T6 重启 reconciliation 不依赖崩溃前存在中断事件：未结束工作单保留 phase/input/claim 并进入可恢复
-BLOCK。Manager resume 重新进入普通 driver；working 或未可靠收口的 claim 默认交 Actor 检查现场并重新
-claim，settled claim 或显式 judge 决议进入只读 Judge。恢复派发收到“已完成勿重复副作用”的固定提示，
-新 dispatch/message 身份拒绝迟到 Turn；不提供外部副作用 exactly-once 保证。
+[安装与上手](<docs/getting-started.md>) · [配置模板](<docs/example/README.md>) · [使用手册](<docs/user-guide.md>) · [反馈问题](https://github.com/hua0424/dsh-workflow-plugin/issues)
 
-T8 的普通 `/dsh-flow reset` 仅允许当前 Manager，把 active Run 标为 `terminated` 并保留工作单、事件、Snapshot 与 Role mapping；它撤销旧推进资格但不 drain/cancel 外部动作。terminated 后显式 start 会先拒绝已知仍 active/idle 的旧 Role/Judge，Host unknown 风险由用户/Manager 核查。旧 execution/events 仍保留供维护读取，但公开 `workflow_status` 只允许查询当前 Run 的 execution，旧/新 Manager 都不能跨 Run 读取。
+## 为什么使用它
 
-当前 claim 合同为 `node_claim({ result, handoff })`：`result` 必须命中当前冻结节点声明的
-结果名（Child 调用层是被调用流程的返回名，Program 是协议固定的 PASS/FAIL），两者都必填；
-handoff trim 后 1..8000 字符，业务终局也必填；明确拒绝旧 `outcome` 与 summary/handoffContext。
-claim 不携带 nodeToken，运行时核对真实派发身份。Judge、Manager、后继与最终结果
-共用原文，无独立摘要或 fallback。Catalog 只接受 `agent-workflow/v3`：v2/v1 Catalog 被拒绝，
-不提供双协议运行时、不把 v2 的 `failed` 猜测转换成业务结果。
+- **明确分工与验收**：为开发、审查、测试等角色指定职责和模型；执行结果通过核验后才推进。
+- **把流程变成配置**：可视化编辑节点、结果分支和子流程，保存为 YAML；同一套流程可重复使用。
+- **在对话中启动**：选择模板、填写任务，或用 `/dsh-flow start` 启动，不必手工协调每一轮交接。
+- **出问题可暂停处理**：缺少信息或执行故障时进入 BLOCK，补充材料后恢复；状态和关键事件保存在本地。
+- **看得见进度**：查看当前节点、判定和子流程。安装提供 `betterSidebar` 服务的配套侧栏后，还可使用「工作流监控」页签。
 
-State format 为 `agent-workflow-state/v10`：`runs`、`node_executions`、
-`node_execution_events` 保存位置、当前工作与关键快照；旧 v3–v9/legacy 或坏库进入 maintenance 并
-fail-closed，不静默迁移。只有 root 人类显式执行 `/dsh-flow reset --incompatible-store` 才会备份整个 SQLite（含 WAL；坏库保留原始 bundle）后切换空 v10 库，失败不替换源库。REJECT 后当前单保留一代完整 previous claim/Judge 与统一 judgment 关联，
-补充/恢复材料只保留当前完整版本，旧值由 events 解释；正常恢复不回放 events。
+> 工作流按节点**串行推进**，不是并行任务调度器。核验能约束流程，但不保证模型输出绝对正确；恢复或终止流程也不会撤销已发生的文件修改、推送或合并。
 
-当前接通 Actor Task 的 ACCEPT/REJECT/NEED_CONTEXT、正常 BLOCK 的 auto/actor/judge resume、有效 claim 下 Judge respawn、Program 按统一 Target 路由 PASS/FAIL（ERROR 交 `node_resolve_program` 事实确认，恰好推进一次）、嵌套 Child 原子返回、结果互斥路由（REJECT 后改选另一结果需重新核验）、显式 Role/Judge model override、Reset/terminated（自 #30 起同 workspace 任意顶层会话可执行，工作流内部参与者拒绝），以及 `workflow_status` 的 Manager-only 当前 Run execution 历史分页（stable after、limit ≤ 50，跨 Run 拒绝）。标准 Web profile 必须提供正式 `jobs` 与 `compaction`；Session persistence 缺失/读取异常只记为 availability unknown，不冒充 missing。不兼容 Store 的 status/全库备份退出命令在 maintenance 下保持可用，普通 list/start/tools 明确拒绝，不退回旧引擎。
-真实宿主组合命令为 `pnpm run test:real-host`；受控 smoke、真实 Host + 脚本 LLM、外部模型行为三者不得混称。
+## 界面预览
 
-## Current documentation
+### 可视化配置
 
-- [`CONTEXT.md`](CONTEXT.md) — 当前领域术语与 T6–T9 实现边界。
-- [`docs/design/node-execution-runtime.md`](docs/design/node-execution-runtime.md) / [`spec`](docs/specs/node-execution-runtime.md) — refact 权威设计与验收基线。
-- [`A01–A30 验收账本`](docs/testing/node-execution-runtime-acceptance.md) / [`旧测试迁移`](docs/testing/runtime-refact-test-migration.md) — 动态证据、真实 Host 边界与删除映射。
-- [`长尾讨论`](docs/pending-discussions/runtime-refact-long-tail.md) — 不阻塞本次主要流程的后续边界。
-- [`docs/work-plans/runtime-refact.md`](docs/work-plans/runtime-refact.md) — T1–T9 历史工单依赖与分票证据（已完成并合入）。
-- [`docs/design/configurable-agent-workflow-graph.md`](docs/design/configurable-agent-workflow-graph.md) — 旧版设计参考，不覆盖 refact 新规格。
-- [`docs/testing/acceptance-test-plan.md`](docs/testing/acceptance-test-plan.md) / [`report`](docs/testing/acceptance-report.md) — 原单表实现的历史验收资料（带版本标记，保留适用版本；不代表当前实现），现行入口见 [`旧测试迁移/现行验收入口`](docs/testing/runtime-refact-test-migration.md)。
-- [`docs/example/`](docs/example/) — copyable v3 workflow config templates（`coding-workflow-rapid.yaml` 单仓快速、`coding-workflow.yaml` 多仓交付等，`workflow-template.yaml` 为 v2 历史遗留、不可加载、不在安装范围内）+ config/model reference for new workflows；完整 v3 组合示例见 [`v3-combined-example.yaml`](docs/example/v3-combined-example.yaml)（`workflow-template.yaml` 自身的迁移归 Issue #129，已落地为上述 v3 生产配置）。
+> **截图待补** — 展示「工作流配置」画布、节点连线与角色属性。
 
-Superseded `feature-delivery/v1` designs remain available in Git history.
+### 启动与监控
 
-## Repository layout
+> **截图待补** — 展示「启动工作流」弹窗，以及配套侧栏中的运行进度。
 
-```
-src/
-  index.ts            plugin entry (Cordis apply: command+tools+engine wiring)
-  types.ts            domain types, limits, error classes
-  catalog/            restricted YAML 1.2 parse + strict schema + static validation + scan
-  state/              SQLite store (node:sqlite) + invariants + nodeToken
-  engine/             serial node advancement, token settlement, deferred dispatch
-  roles/              role/judge spawn plans, model routes, deny/allow lists
-  judge/              transcript projection + judge.claim-correct Judgment Packet + judge_claim protocol
-  tools/              workflow control tools + read-only inspection wrappers
-  commands/           /dsh-flow list|start|status|reset
-  programs/           git/gh runner + 2 builtin programs
-  plugin/host.ts      adapters wiring real DSH services into the engine
-cordis.patch.yml      profile-bundle patch (inserts the plugin row)
+[截图补充说明](<docs/images/README.md>)
+
+## 适合哪些任务
+
+| 场景 | 内置模板 |
+| --- | --- |
+| 单仓库、单 Issue / PR 的通用开发（默认安装） | `development-workflow` |
+| 单仓库、单个任务的快速交付（进阶示例） | `coding-workflow-rapid` |
+| 单仓库、拆票到里程碑的完整交付 | `coding-workflow-single` |
+| 多仓库、小范围任务 | `coding-workflow-rapid-multi` |
+| 多仓库、分票与里程碑交付 | `coding-workflow` |
+
+后四份模板保留为进阶示例，不由 `init` 安装。这些是起点，不是固定规则：可按团队需要调整角色、模型、审查和验收步骤。详见[模板与配置说明](<docs/example/README.md>)。
+
+## 安装与首次运行
+
+**要求：Node.js ≥ 22.19、DSH ≥ 0.2.1-rc.2，并已配置可用模型。** 从源码构建还需要 Git 和 pnpm；推荐使用 Node.js 24。
+
+当前先按[安装指南](<docs/getting-started.md>)构建并安装完整插件 bundle。不要直接安装源码仓库或把根目录的 `npm pack` 当作完整安装包：当前打包白名单未包含初始化资源。
+
+插件加载后，在 DSH 对话中执行：
+
+```text
+/dsh-flow init
 ```
 
-## Development
+重启 DSH，选择 **团队工作流 Manager（通用）** 新建项目会话，确认 Manager 已配置可用模型（默认模板的角色与 Judge 均继承该模型），然后检查并启动：
 
-- Build: `pnpm run build` (tsc → `lib/`). The profile bundle loads `lib/index.js`; Node refuses to strip `.ts` inside node_modules, so the compiled output is the runtime artifact. 脚本用 `node node_modules/typescript/bin/tsc` 显式调用编译器：`.bin` 链接缺失（pnpm install 未物化 bin）时 `tsc` 不在 PATH，文档命令仍必须可直接跑通。
-- 验收（现行单入口）：`pnpm run verify` = `typecheck`（`tsc --noEmit`）+ `test:suite`（全量 suite）+ `test:smoke`（两套受控 smoke）。逐项：
-  - `pnpm test` — 全量 node:test（标准入口，按文件隔离子进程）。
-  - `pnpm run test:suite` — 同样全量、`--test-isolation=none`：受限沙箱禁止派生进程（`spawn EPERM`）时的等价入口；Node 22.x 该 flag 名为 `--experimental-test-isolation=none`。
-  - `pnpm run test:smoke` — 统一受控 smoke 入口 = `node scripts/t3-smoke.mjs`（`reuse: continuable`：Role 跨节点复用 + 节点边界 compact + 业务终局 + 关库重开）&& `node scripts/e2e-smoke.mjs`（缺省 `reuse: node`：REJECT 修正 + `retry` 结果自环 + 离开节点 drain + #131 Child 显式返回 + #132 Program 目标路由与人工恢复 + trace）。二者都只用独立临时 home，不读写真实 `~/.dsh`。
-  - `pnpm run test:real-host` — 单独运行 exact 0.2.0-rc.2 真实 Host 组合（单文件直跑，不派生 test runner 子进程）；与上面两类 controlled smoke 分开报告，三者不得混称。
-  - 计数口径：0 fail；仅允许**环境条件**跳过的用例（`test/programs.test.ts` 两条真实 spawn 用例在禁派生进程的环境按 EPERM 探测跳过，其逻辑由受控适配器用例覆盖）——不靠隐藏失败换取 0 skip，逐项替代见迁移账本。
-- 诊断工具：`node scripts/check-state-rows.mjs <state.sqlite3 路径>` 只读诊断指定库（显式路径、不默认真实 home、复制成临时快照后只读打开，不改写目标库）；当前 v10 / 旧三表（v9 及更早）/ 旧单表 / 未知布局 / 坏库分别给诊断，退出码 0/1/2。
-- Runtime deps: `yaml`, `zod`. Host API packages (`@deepseek-ai/dsh-*`) are dev-dependencies only — at runtime they resolve from the DSH installation via the profile-module fallback (`~/.dsh/profiles/node_modules`), exactly like the shipped bundles. `jobs`/`compaction` use exact `0.2.0-rc.2` types and are required Host services, not plugin runtime dependencies.
+```text
+/dsh-flow list
+/dsh-flow check development-workflow
+/dsh-flow start development-workflow 修复指定问题，并完成审查和测试
+```
 
-## Installation (development)
+`init` 只安装通用开发工作流与通用 Manager preset，不覆盖已有差异配置，也不删除用户已有模板；备份覆盖和预演选项见[安装指南](<docs/getting-started.md>)。启动会调用模型，并可能按任务执行文件或远端操作，请先明确授权边界。
 
-下列流程需要**用户显式授权**：本轮验收只生成隔离产物（`--out`），不写 `~/.dsh`、不影响任何真实 Run。
+## 深入了解
 
-The plugin is a DSH Profile Bundle, deployed wfgate-style into a local bundle
-directory under the web profile (the same layout the shipped bundles use, so
-`@deepseek-ai/*` resolves to the HOST's instances via the profiles fallback).
+- [使用手册](<docs/user-guide.md>)：命令、模型路由、恢复与故障排查。
+- [配置模板](<docs/example/README.md>)：角色、节点、结果分支与子流程。
+- [开发指南](<docs/development.md>)：构建、测试、架构与运行时文档入口。
+- [问题反馈](https://github.com/hua0424/dsh-workflow-plugin/issues/new/choose)：附上版本、复现步骤和脱敏后的错误信息。
 
-1. `pnpm run build` — compile `lib/`.
-2. `node scripts/deploy-web.mjs` — copies `lib/`, `cordis.patch.yml`, and a
-   bundle `package.json` (version/dependencies 取自本仓库 `package.json`，宿主包
-   `@deepseek-ai/*` 只留在 devDependencies，出现在 dependencies 即 fail-closed)
-   into `~/.dsh/profiles/web/wfdev`。隔离产物验证用
-   `node scripts/deploy-web.mjs --out <临时目录>`：只生成、不触碰 profile。
-3. Ensure `"dsh-agent-team-workflow": "file:wfdev"` is in
-   `~/.dsh/profiles/web/package.json` dependencies and the name is listed in
-   `dsh.profile.bundles` (both set up once; `pnpm install` reconciles).
-4. Restart DSH (`dsh web`).
+## 许可证
 
-Re-deploy after every `pnpm run build` (step 2). The profile's `pnpm install`
-owns runtime deps (`yaml`, `zod`).
-
-Workflow configs live in `%DSH_HOME%\workflows\*.yaml` (e.g. `milestone-delivery.yaml`, `smoke-test.yaml`). New workflows: copy [`docs/example/coding-workflow-rapid.yaml`](docs/example/coding-workflow-rapid.yaml) (v3, 单仓快速) or another v3 production template in the same directory and adapt it (see [`docs/example/README.md`](docs/example/README.md) for the model-route and config-surface reference; `workflow-template.yaml` is v2 历史遗留、不可加载，不在此安装范围内).
-
-## Run trace logs
-
-Trace 是便于人工排障的派生产物，关键业务历史以 SQLite `node_execution_events` 为准；不要用 trace 恢复或替代事务事实。
-
-- **Location / naming**：`<catalogDir>/<workflowId>/yyyyMMdd-HHmmss-<runId前8位>.txt`，路径随 Run 持久化，重启后仍追加同一文件。
-- **当前格式**：`fmt=3` 的单行 `key=value`；Runtime best-effort 记录 `START`、`CLAIM`、`JUDGE`、`ROUTE`、`BLOCK`、`MODEL`。free text 有界、JSON 转义并对 credential-like 文本做兜底脱敏。
-- **不维护双路径**：Program/Child/resume/respawn/compact 的权威材料和顺序写入对应工作单事件；旧 `PROGRAM/PUSH/POP/RESUME/RESPAWN/COMPACT` 专属 trace 合同已删除，不再承诺。
-- **一致性**：业务状态与事件同事务提交；trace 只在提交后追加，失败不阻断 Run，首次失败每 Run 最多告警一次。
-- **限制**：trace 不保存 reasoning、完整工具 transcript 或 Program 参数，也不是 secret scanner。长期细粒度可观测性取舍见 `docs/pending-discussions/runtime-refact-long-tail.md`。
-
-The controlled smokes (`pnpm run test:smoke` = `t3-smoke.mjs` && `e2e-smoke.mjs`) drive the full
-v3 loop on production code paths. `e2e-smoke.mjs`（`pnpm run test:e2e`）覆盖缺省 `reuse: node`：
-wrong work → claim → async REJECT → correction re-dispatch → corrected
-work → re-claim → ACCEPT → next node — for BOTH a Manager node and a Role node，
-外加 `retry` 结果自环、离开节点 drain + 新 visit 新会话、迟到旧 Judge 失权与 `fmt=3` trace；
-`t3-smoke.mjs`（`pnpm run test:t3`）覆盖 `reuse: continuable` 的另一半：Role 跨节点复用 +
-节点边界 compact + 业务终局（`{ return: delivered }`）+ SQLite 关库重开。两者都用内联 v3 catalog 与隔离临时 DSH home，
-真实 `~/.dsh` 绝不被触碰，且都不冒充真实宿主 E2E。
+[MIT](<LICENSE>) © hua0424

@@ -1,0 +1,77 @@
+# Development and runtime reference
+
+[中文首页](<../README.md>) · [English README](<../README.en.md>) · [Installation](<getting-started.en.md>)
+
+This page keeps contributor and runtime details out of the product overview. Most linked design documents are in Chinese and identify their applicable versions.
+
+## Build and verify
+
+From the repository root, with Node.js 24 and pnpm available:
+
+```sh
+pnpm install
+pnpm run build
+node web-client/build.mjs
+pnpm run verify
+```
+
+The server is TypeScript ESM. The runtime loads compiled JavaScript, not source TypeScript inside `node_modules`. The client is plain JavaScript and needs its own build; the root TypeScript build does not compile it.
+
+| Command | Purpose |
+| --- | --- |
+| `pnpm run build` | Compile the server |
+| `node web-client/build.mjs` | Build the Web client |
+| `pnpm run verify` | Typecheck, full suite and both controlled smokes |
+| `pnpm test` | Run tests with the standard node:test isolation |
+| `pnpm run test:suite` | Run the full suite with process isolation disabled |
+| `pnpm run test:smoke` | Run the controlled T3 and E2E scenarios in isolated temporary homes |
+| `pnpm run test:real-host` | Run the separate real-host integration checks |
+
+The suite command uses Node's `--test-isolation=none` spelling; use Node.js 24 for the commands above. Controlled smokes, real-host tests with scripted model responses, and real external-model behavior are different kinds of evidence. See the [test policy](<testing/runtime-refact-test-migration.md>) and the versioned [runtime acceptance ledger](<testing/node-execution-runtime-acceptance.md>); historical test counts are not current release guarantees.
+
+For browser interaction checks, see the [client guide](<../web-client/README.md>) and [editor UI smoke guide](<../scripts/editor-ui-smoke/README.md>).
+
+## Generate an isolated bundle
+
+After building both server and client:
+
+```sh
+node scripts/deploy-web.mjs --out ../dsh-workflow-bundle-check
+```
+
+Use a dedicated output directory, never the source checkout or profile root. This generates artifacts without changing a live DSH profile. Omitting `--out` writes to the default development deployment location and is a separate, explicitly authorized action. Every rebuild needs a new bundle generation before deployment; restart DSH and refresh the browser after updating the installed plugin.
+
+Runtime dependencies are `yaml` and `zod`. Host API packages remain development dependencies; at runtime they resolve from the DSH installation rather than bundling another host instance.
+
+**Packaging is not yet a complete npm-release path.** The root publish allowlist omits init resources; the generated bundle includes them but currently omits compatibility metadata (`engines`) and documentation/license files. The [installation guide](<getting-started.en.md>) uses a local bundle and states the compatibility prerequisites explicitly. Before public distribution, fix and inspect the final archive, include the license and documentation, then test installation into an isolated profile. Do not infer publish readiness from a successful TypeScript build or `npm pack` exit code.
+
+## Code map
+
+| Area | Responsibility |
+| --- | --- |
+| [Entry point](<../src/index.ts>) | Register commands/tools and connect host services |
+| [Catalog](<../src/catalog/>) | Parse, validate and normalize workflow YAML |
+| [Engine](<../src/engine/>) | Dispatch, result routing, pauses and recovery |
+| [State](<../src/state/>) | SQLite work orders and key events |
+| [Roles](<../src/roles/>) / [Judge](<../src/judge/>) | Role setup and independent result verification |
+| [Tools](<../src/tools/>) / [Programs](<../src/programs/>) | Authorized control tools and fixed built-in programs |
+| [Host adapter](<../src/plugin/>) | Connect the engine to DSH agent and session services |
+| [Initializer](<../src/init/>) | Shared template/preset installation semantics |
+| [Web client](<../web-client/README.md>) | Visual editor, launch dialog and optional run monitor |
+
+## Runtime details and historical references
+
+- [Domain terminology](<../CONTEXT.md>): Manager, Role Actor, Judge, Run, Node and handoff vocabulary.
+- [Runtime design](<design/node-execution-runtime.md>) and [specification](<specs/node-execution-runtime.md>): work orders, dispatch and recovery contracts.
+- [User guide](<user-guide.md>): commands, model routes, BLOCK handling, state maintenance and troubleshooting.
+- [Template reference](<example/README.md>): current `agent-workflow/v3` configuration. Older v1/v2 templates are not runtime-compatible.
+- [Long-tail discussion](<pending-discussions/runtime-refact-long-tail.md>): recorded tradeoffs and deferred questions.
+- [Runtime work plan](<work-plans/runtime-refact.md>), [original design](<design/configurable-agent-workflow-graph.md>) and [original acceptance report](<testing/acceptance-report.md>): historical material, not current operating instructions.
+
+SQLite work orders and events are the authoritative workflow history. Trace files are best-effort diagnostics under `<catalogDir>/<workflowId>/`, not a recovery log or an exactly-once guarantee for external actions. For explicit-path, read-only state diagnostics:
+
+```sh
+node scripts/check-state-rows.mjs <state.sqlite3-path>
+```
+
+The tool diagnoses a snapshot copy rather than modifying the target database. Recovery and reset must still account for external side effects; stopping a Run does not undo a push, merge or file write.

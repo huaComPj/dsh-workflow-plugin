@@ -4,7 +4,7 @@
  * 共享同一套落盘语义（`src/init/install.ts` 的 parseInitArgs/resolveInitSources/runInit），
  * 只多一个对话内不支持的 `--home <目录>`（缺省为当前 DSH home）。
  *
- * 用法：node scripts/dsh-workflow-init.mjs [--full] [--force] [--dry-run] [--home <目录>]
+ * 用法：node scripts/dsh-workflow-init.mjs [--force] [--dry-run] [--home <目录>]
  */
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { dirname, join } from 'node:path'
@@ -18,8 +18,8 @@ if (parsed.error !== undefined) {
   process.exit(2)
 }
 if (parsed.help === true) {
-  console.log('用法：node scripts/dsh-workflow-init.mjs [--full] [--force] [--dry-run] [--home <目录>]\n'
-    + '缺省安装最小集与通用 Manager preset；--full 全量；--force 备份后覆盖；--dry-run 只报告不写入。')
+  console.log('用法：node scripts/dsh-workflow-init.mjs [--force] [--dry-run] [--home <目录>]\n'
+    + '安装 development-workflow 与通用 Manager preset；--force 备份后覆盖；--dry-run 只报告不写入。')
   process.exit(0)
 }
 let sources

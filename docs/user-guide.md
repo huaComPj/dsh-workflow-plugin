@@ -20,11 +20,12 @@
 
 ## 2. 安装 / 部署 / 升级
 
-插件以 dev bundle（`wfdev`）形式部署在 web profile。**部署是需你显式授权的动作**；只想核对产物时用隔离生成（`--out`，不写 `~/.dsh`）：
+首次安装请按[安装与上手](<getting-started.md>)完成前后端构建、完整 bundle 生成与 Web profile 注册。下面只说明已有开发部署（`wfdev`）的更新路径，不代替首次安装；**部署是需你显式授权的动作**。只想核对产物时用隔离生成（`--out`，不写 `~/.dsh`）：
 
 ```bash
 pnpm run build                              # tsc 编译到 lib/（部署前必须）
-node scripts/deploy-web.mjs --out /tmp/wfdev-check   # 隔离生成产物并核对版本/依赖（不部署）
+node web-client/build.mjs                    # 单独构建 Web 客户端
+node scripts/deploy-web.mjs --out ../wfdev-check   # 专用隔离目录生成产物（不部署）
 node scripts/deploy-web.mjs                 # 部署到 ~/.dsh/profiles/web/wfdev（需授权）
 # 重启 DSH（dsh web）生效
 ```
@@ -254,18 +255,19 @@ instruction**（结果验收条件进各结果 `criteria`，不依赖 persona �
 /dsh-flow reset                       终止当前 workspace 的活动 Run（不取消外部动作）
 /dsh-flow reset --incompatible-store  备份并退出整个不兼容 State Store
 /dsh-flow check <workflow-id>         静态检查各角色 provider 注册 + modelId 本地列表 + 思考档位（只报告，不阻断）
-/dsh-flow init [--full] [--force] [--dry-run]  一键安装通用 Manager preset + 默认工作流（最小集默认；--full 全量）
+/dsh-flow init [--force] [--dry-run]   安装通用 Manager preset + 通用开发工作流
 ```
 
 - `init`（#209）把通用 Manager preset 落盘到 `$DSH_HOME/cordis.patch.yml`、
-  默认工作流落盘到 `$DSH_HOME/workflows/`。缺省只装最小集
- （`coding-workflow-rapid`），`--full` 装全部生产模板（旧协议遗留模板与
-  组合示例不在安装范围）。已存在且内容不同的文件默认跳过并提示首个差异行，
+  默认工作流落盘到 `$DSH_HOME/workflows/`。统一只安装
+  `development-workflow`（通用开发工作流）；原四份复杂模板保留为
+  [进阶示例](<example/README.md>)，不由 init 安装。`--full` 已删除，传入报未知参数；
+  用户已有其他模板不会被删除。已存在且内容不同的文件默认跳过并提示首个差异行，
   永不静默覆盖；`--force` 才备份（同目录 `.bak-<timestamp>` 兄弟文件）后覆盖；
   `--dry-run` 只报告不写入。写完自动校验并报告问题文件（问题只影响自身）。
   对话内命令不支持 `--home`（永远装进当前 DSH home）；要装到指定目录用仓库侧
   薄封装（与命令同一套落盘语义）：
-  `node scripts/dsh-workflow-init.mjs [--full] [--force] [--dry-run] [--home <目录>]`。
+  `node scripts/dsh-workflow-init.mjs [--force] [--dry-run] [--home <目录>]`。
 
 - `check` 把 catalog 每个角色（含 Judge）的显式模型路由与当前
   profile 做三段式本地比对（无网络发现）：`model.provider` 是否已注册；

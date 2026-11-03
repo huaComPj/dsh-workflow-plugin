@@ -1,9 +1,8 @@
 # 工作流配置模板（docs/example/）
 
-> ✅ **版本状态（#129 起）**：运行时只接受 `agent-workflow/v3`。本目录的
-> [`coding-workflow.yaml`](coding-workflow.yaml) 与
-> [`coding-workflow-rapid.yaml`](coding-workflow-rapid.yaml) 是**可直接加载的 v3
-> 生产配置**（#129 迁移落地，与本文件字段说明同源维护）；
+> ✅ **版本状态**：运行时只接受 `agent-workflow/v3`。默认安装
+> [development-workflow.yaml](<development-workflow.yaml>)（通用开发工作流）。
+> 原四份 `coding-workflow*` 配置仍是可加载的 v3 **进阶示例**，不由 init 安装；
 > [`v3-combined-example.yaml`](v3-combined-example.yaml) 是覆盖全部节点类型的
 > v3 组合示例。`workflow-template.yaml` 仍是 **v2 时代**的遗留模板，
 > **不可加载**，仅作历史参考保留（不半迁移成中间态）。
@@ -20,17 +19,47 @@ catalog 目录后按需修改，不要从零手写。
 
 | 场景 | 模板 |
 |---|---|
-| 单仓、单任务 | [coding-workflow-rapid.yaml](coding-workflow-rapid.yaml) |
+| 单仓、单 Issue / PR（默认安装） | [development-workflow.yaml](<development-workflow.yaml>) |
+| 单仓、单任务（进阶示例） | [coding-workflow-rapid.yaml](<coding-workflow-rapid.yaml>) |
 | 伞仓多仓、小范围单 Issue | [coding-workflow-rapid-multi.yaml](coding-workflow-rapid-multi.yaml) |
 | 伞仓多仓、分票及 Milestone 交付 | [coding-workflow.yaml](coding-workflow.yaml) |
 | 单仓、分票及 Milestone 完整交付 | [coding-workflow-single.yaml](coding-workflow-single.yaml) |
 
+## 默认模板：通用开发工作流
+
+[development-workflow.yaml](<development-workflow.yaml>) 面向单仓库、单 GitHub Issue / PR，无子流程：
+
+```text
+create-issue → implement → review → test → merge
+                 ↑          │       │
+                 └──────────┴───────┘ 产品缺陷返工
+```
+
+| 节点 | 职责 |
+| --- | --- |
+| `create-issue`（Manager） | 澄清需求、验收标准与授权边界，用户确认后创建 GitHub Issue。 |
+| `implement` | 建任务分支，完成最小实现和开发自测，提交改动并创建或更新 PR。 |
+| `review` | 检查实现与需求、代码质量；产品缺陷回 `implement`，通过后进入独立测试。 |
+| `test` | 验证同一候选提交满足验收标准；产品缺陷回 `implement`，修复后必须重走 `review` 和 `test`。 |
+| `merge`（Manager） | 核对已审查、已测试的候选提交，获得用户人工确认后 squash 合入仓库默认主线，再关闭 Issue。 |
+
+- 审查、测试或合并前发现候选修订变化，回 `implement` 重走审查、测试与人工确认；旧证据不覆盖新提交。
+- 环境、网络或权限问题进入 BLOCK，不冒充产品缺陷或跳过验收。
+- 各角色和 Judge 均继承 Manager 的模型路由；worker 使用节点级会话，Manager 节点由当前主会话承担。
+- 不依赖额外技能；方法直接精简写在节点 `instruction` 中。
+- 不执行发布、部署或删除分支；不扩展成多仓、Milestone 或多 Issue 编排。
+- `/dsh-flow init` 只安装该模板与原通用 Manager preset；保留用户已有模板，差异内容默认跳过。`--force` 备份后覆盖，`--dry-run` 只预演；`--full` 已删除，传入会报未知参数。
+
+其余四份复杂模板保留为进阶示例，按需手工复制；采用前核对各自模型、授权边界与流程约定。新默认模板的完整边界和验收条件见[设计规格](<../specs/development-workflow.md>)。
+
 ## 使用方法
+
+默认模板可通过 `/dsh-flow init` 安装，完整步骤见[安装指南](<../getting-started.md>)。手工复制模板时：
 
 1. 复制模板：
 
    ```powershell
-   Copy-Item docs/example/coding-workflow-rapid.yaml "$env:USERPROFILE\.dsh\workflows\<workflow-id>.yaml"
+   Copy-Item docs/example/development-workflow.yaml "$env:USERPROFILE\.dsh\workflows\<workflow-id>.yaml"
    ```
 
    （`%DSH_HOME%\workflows\`，DSH_HOME 默认为 `~/.dsh`。）
@@ -255,7 +284,8 @@ roles:
 
 ## 完整示例
 
-- **v3 生产配置（#129 起，可直接加载）**：
+- **默认通用开发模板**：[development-workflow.yaml](<development-workflow.yaml>)，五节点与使用边界见上文。
+- **进阶 v3 配置（可直接加载，不由 init 安装）**：
   [`coding-workflow.yaml`](coding-workflow.yaml)（2026-09-23.1：仅伞仓多仓 Milestone，含子流程；
   用户一次确认 baseline、Milestone 名、统一 milestone 分支名及每仓起点，全部仓走 feature → milestone → baseline。
   Issue/Milestone 只在伞仓；每票完整跨仓实现、审查、合入 milestone、独立集成测试通过后关闭）与

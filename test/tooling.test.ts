@@ -16,9 +16,9 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { StateStore } from '../src/state/store.ts'
-import { resolveInitSources } from '../src/init/install.ts'
+import { resolveInitSources, WORKFLOW_IDS } from '../src/init/install.ts'
 import { inspectStateDb, parseDiagnosticArgs } from '../scripts/check-state-rows.mjs'
-import { bundlePackageJson, deployBundle, INIT_WORKFLOW_IDS, parseDeployArgs } from '../scripts/deploy-web.mjs'
+import { bundlePackageJson, deployBundle, parseDeployArgs } from '../scripts/deploy-web.mjs'
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
 const repoPackage = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
@@ -128,12 +128,20 @@ test('#101 隔离 bundle：deployBundle 只写隔离目标，产物版本/依赖
     writeFileSync(join(fakeRepo, 'resources', 'preset-manager.patch.yml'),
       readFileSync(join(repoRoot, 'resources', 'preset-manager.patch.yml'), 'utf8'))
     mkdirSync(join(fakeRepo, 'docs', 'example'), { recursive: true })
-    for (const id of INIT_WORKFLOW_IDS) {
+    for (const id of WORKFLOW_IDS) {
       writeFileSync(join(fakeRepo, 'docs', 'example', `${id}.yaml`),
         readFileSync(join(repoRoot, 'docs', 'example', `${id}.yaml`), 'utf8'))
     }
     const target = join(dir, 'isolated-bundle')
+    mkdirSync(join(target, 'resources', 'workflows'), { recursive: true })
+    writeFileSync(join(target, 'resources', 'workflows', 'coding-workflow-rapid.yaml'), '# 旧 bundle 资源\n')
+    mkdirSync(join(target, 'workflows'))
+    writeFileSync(join(target, 'workflows', 'coding-workflow-rapid.yaml'), '# 用户 catalog\n')
+    writeFileSync(join(target, 'resources', 'custom.txt'), '保留其他资源')
     const { manifest } = deployBundle({ repoRoot: fakeRepo, target })
+    assert.deepEqual(readdirSync(join(target, 'resources', 'workflows')), ['development-workflow.yaml'])
+    assert.equal(readFileSync(join(target, 'workflows', 'coding-workflow-rapid.yaml'), 'utf8'), '# 用户 catalog\n')
+    assert.equal(readFileSync(join(target, 'resources', 'custom.txt'), 'utf8'), '保留其他资源')
     const written = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'))
     assert.deepEqual(written, manifest)
     assert.equal(written.version, repoPackage.version)
@@ -144,7 +152,7 @@ test('#101 隔离 bundle：deployBundle 只写隔离目标，产物版本/依赖
     assert.match(readFileSync(join(target, 'cordis.patch.yml'), 'utf8'), /dsh-agent-team-workflow/)
     // #209：隔离 bundle 内的安装源可解析（bundle 布局优先，不碰真实用户目录）。
     const bundleSources = resolveInitSources(target)
-    assert.deepEqual(bundleSources.workflows.map(item => item.id).sort(), [...INIT_WORKFLOW_IDS].sort())
+    assert.deepEqual(bundleSources.workflows.map(item => item.id).sort(), [...WORKFLOW_IDS].sort())
     assert.match(readFileSync(bundleSources.presetFile, 'utf8'), /preset-manager/)
     // #209：缺内置资源时 fail-closed（与 client bundle 缺失同语义）。
     rmSync(join(fakeRepo, 'resources'), { recursive: true, force: true })

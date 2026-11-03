@@ -27,7 +27,7 @@ export interface CommandHost {
   /** provider 注册 + modelId 本地列表 + reasoningEffort 档位静态检查：逐角色报告，永不阻断加载。 */
   check(workflowId: string): Promise<{ ok: boolean; reason?: string; message?: string }>
   /**
-   * #209：一键安装（最小集默认，--full 全量）。对话内命令不支持 --home，
+   * #209：一键安装（development-workflow + 通用 Manager preset）。对话内命令不支持 --home，
    * 永远装进当前 DSH home；ok=false 时 text 即报告正文（含校验问题）。
    */
   init(options: InitOptions): Promise<{ ok: boolean; text: string }>
@@ -129,13 +129,13 @@ const USAGE = `用法：
 /dsh-flow reset                       终止当前 workspace 的活动 Run（不取消外部动作）
 /dsh-flow reset --incompatible-store  备份并退出整个不兼容 State Store
 /dsh-flow check <workflow-id>         静态检查各角色 provider 注册 + modelId 本地列表 + 思考档位（只报告，不阻断）
-/dsh-flow init [--full] [--force] [--dry-run]  一键安装通用 Manager preset + 默认工作流（最小集默认；--full 全量）`
+/dsh-flow init [--force] [--dry-run]  一键安装通用 Manager preset + development-workflow`
 
 export function makeDshFlowCommand(host: CommandHost, activate?: SessionActivator): CommandDefinition {
   const command: CommandDefinition = {
     name: 'dsh-flow',
     description: 'Agent-team workflow 控制：list / start / status / reset / check / init',
-    input: { hint: 'list | start <workflow-id> [text] | status | reset | check <workflow-id> | init [--full] [--force] [--dry-run]' },
+    input: { hint: 'list | start <workflow-id> [text] | status | reset | check <workflow-id> | init [--force] [--dry-run]' },
     recordInput: true,
     async handler(invocation) {
       const raw = invocation.rawInput.trim()
@@ -204,7 +204,7 @@ export function makeDshFlowCommand(host: CommandHost, activate?: SessionActivato
           }
           const parsed = parseInitArgs(rest)
           if (parsed.error !== undefined) return { kind: 'error', text: `${parsed.error}` }
-          if (parsed.help === true) return { kind: 'success', text: `/dsh-flow init [--full] [--force] [--dry-run]\n缺省安装最小集与通用 Manager preset；--full 全量；--force 备份后覆盖；--dry-run 只报告不写入。` }
+          if (parsed.help === true) return { kind: 'success', text: `/dsh-flow init [--force] [--dry-run]\n安装 development-workflow 与通用 Manager preset；--force 备份后覆盖；--dry-run 只报告不写入。` }
           const outcome = await host.init(parsed.options)
           return outcome.ok ? { kind: 'success', text: outcome.text } : { kind: 'error', text: outcome.text }
         }

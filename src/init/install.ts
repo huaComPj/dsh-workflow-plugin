@@ -4,8 +4,8 @@
  *
  * 安装内容：通用 Manager preset 声明（进 home patch `$DSH_HOME/cordis.patch.yml`）
  * + 默认工作流 YAML（进 catalog 目录 `$DSH_HOME/workflows/<id>.yaml`）。
- * 默认最小集（单仓快速模板），`--full` 装全部生产模板；v2 遗留模板与组合示例
- * 不在安装源内。已存在的用户文件永不静默覆盖：字节一致跳过，不一致默认跳过
+ * 只安装 development-workflow；旧模板不在安装源内，也不删除已有 catalog。
+ * 已存在的用户文件永不静默覆盖：字节一致跳过，不一致默认跳过
  * 并提示首个差异行，只有 `--force` 才备份（`.bak-<timestamp>` 同目录兄弟）后覆盖；
  * `--dry-run` 只报告不写入。写完对每个目标文件做隔离校验（单个文件的问题只
  * 报告自身，不影响其他文件），工作流用本插件的受限解析 + 严格 schema + 静态
@@ -20,25 +20,17 @@ import { validateAndNormalize, computeDefinitionHash } from '../catalog/validate
 
 export const PRESET_ROW_ID = 'preset-manager'
 export const HOME_PATCH_FILENAME = 'cordis.patch.yml'
-/** 最小集：最常用的单仓快速模板。 */
-export const MINIMAL_WORKFLOW_IDS = ['coding-workflow-rapid'] as const
-/** 全量：在最小集之外再加其余生产模板（v2 遗留 + 组合示例排除在外）。 */
-export const FULL_WORKFLOW_IDS = [
-  'coding-workflow-rapid',
-  'coding-workflow',
-  'coding-workflow-single',
-  'coding-workflow-rapid-multi',
-] as const
+/** init 与 bundle 共用的工作流安装白名单。 */
+export const WORKFLOW_IDS = ['development-workflow'] as const
 
 export const INIT_USAGE = [
-  '用法：dsh-workflow-init [--full] [--force] [--dry-run] [--home <目录>]',
-  '  缺省只安装最小集（coding-workflow-rapid）与通用 Manager preset；',
-  '  --full 安装全部生产模板；--force 备份后覆盖已存在的不同内容；',
+  '用法：dsh-workflow-init [--force] [--dry-run] [--home <目录>]',
+  '  只安装 development-workflow 与通用 Manager preset；',
+  '  --force 备份后覆盖已存在的不同内容；',
   '  --dry-run 只报告不写入；--home 覆盖目标 DSH home（对话内命令不支持）。',
 ].join('\n')
 
 export interface InitOptions {
-  full: boolean
   force: boolean
   dryRun: boolean
 }
@@ -51,12 +43,11 @@ export interface InitSources {
 }
 
 export function parseInitArgs(argv: readonly string[]): { options: InitOptions; home?: string; help?: boolean; error?: string } {
-  const options: InitOptions = { full: false, force: false, dryRun: false }
+  const options: InitOptions = { force: false, dryRun: false }
   let home: string | undefined
   for (let index = 0; index < argv.length; index++) {
     const token = argv[index]!
-    if (token === '--full') options.full = true
-    else if (token === '--force') options.force = true
+    if (token === '--force') options.force = true
     else if (token === '--dry-run') options.dryRun = true
     else if (token === '--help' || token === '-h') return { options, home, help: true }
     else if (token === '--home') {
@@ -80,14 +71,14 @@ export function parseInitArgs(argv: readonly string[]): { options: InitOptions; 
  */
 export function resolveInitSources(root: string): InitSources {
   const bundleWorkflows = join(root, 'resources', 'workflows')
-  const workflowsDir = FULL_WORKFLOW_IDS.every(id => existsSync(join(bundleWorkflows, `${id}.yaml`)))
+  const workflowsDir = WORKFLOW_IDS.every(id => existsSync(join(bundleWorkflows, `${id}.yaml`)))
     ? bundleWorkflows
     : join(root, 'docs', 'example')
   const presetFile = join(root, 'resources', 'preset-manager.patch.yml')
   const missing: string[] = []
   if (!existsSync(presetFile)) missing.push(presetFile)
   const workflows: InitSources['workflows'] = []
-  for (const id of FULL_WORKFLOW_IDS) {
+  for (const id of WORKFLOW_IDS) {
     const source = join(workflowsDir, `${id}.yaml`)
     if (!existsSync(source)) missing.push(source)
     else workflows.push({ id, source })
@@ -353,7 +344,7 @@ export function runInit(home: string, sources: InitSources, options: InitOptions
     if (outcome.status === 'error') failed = true
   }
 
-  const wanted = options.full ? [...FULL_WORKFLOW_IDS] : [...MINIMAL_WORKFLOW_IDS]
+  const wanted = WORKFLOW_IDS
   const selected = sources.workflows.filter(item => (wanted as readonly string[]).includes(item.id))
   if (selected.length !== wanted.length) {
     const absent = wanted.filter(id => !selected.some(item => item.id === id))
@@ -378,7 +369,7 @@ export function runInit(home: string, sources: InitSources, options: InitOptions
     }
   }
 
-  lines.push(`目标 home：${home}（${options.full ? '全量' : '最小集'}${options.force ? '，强制覆盖' : ''}${options.dryRun ? '，预演' : ''}）`)
+  lines.push(`目标 home：${home}（development-workflow${options.force ? '，强制覆盖' : ''}${options.dryRun ? '，预演' : ''}）`)
   lines.push('## 工作流')
   // 装后校验只覆盖本轮落盘的字节（installed/overwritten/up-to-date 与源一致，
   // 校验必过）：skipped-differs 是用户所有的文件，跳过行已说明归属，不再拿

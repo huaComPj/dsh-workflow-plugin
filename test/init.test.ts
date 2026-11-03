@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { runInit, parseInitArgs, resolveInitSources, canonicalJson, MINIMAL_WORKFLOW_IDS, FULL_WORKFLOW_IDS } from '../src/init/install.ts'
+import { runInit, parseInitArgs, resolveInitSources, canonicalJson, WORKFLOW_IDS } from '../src/init/install.ts'
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SOURCES = resolveInitSources(REPO_ROOT)
@@ -19,14 +19,15 @@ function makeHome(): string {
 
 describe('parseInitArgs', () => {
   it('缺省全关', () => {
-    assert.deepEqual(parseInitArgs([]), { options: { full: false, force: false, dryRun: false }, home: undefined })
+    assert.deepEqual(parseInitArgs([]), { options: { force: false, dryRun: false }, home: undefined })
   })
 
   it('各开关与 --home 生效，未知参数报错', () => {
-    const parsed = parseInitArgs(['--full', '--force', '--dry-run', '--home', '/tmp/x'])
-    assert.deepEqual(parsed.options, { full: true, force: true, dryRun: true })
+    const parsed = parseInitArgs(['--force', '--dry-run', '--home', '/tmp/x'])
+    assert.deepEqual(parsed.options, { force: true, dryRun: true })
     assert.equal(parsed.home, '/tmp/x')
     assert.match(parseInitArgs(['--bogus']).error ?? '', /未知参数/)
+    assert.match(parseInitArgs(['--full']).error ?? '', /未知参数 "--full"/)
     assert.match(parseInitArgs(['--home']).error ?? '', /缺少目录参数/)
   })
 })
@@ -36,60 +37,59 @@ describe('runInit', () => {
   beforeEach(() => { home = makeHome() })
   afterEach(() => { rmSync(home, { recursive: true, force: true }) })
 
-  it('最小集：只装 rapid 模板 + preset，不过装其余模板', () => {
-    const result = runInit(home, SOURCES, { full: false, force: false, dryRun: false })
+  it('只装 development-workflow + preset，不安装旧模板', () => {
+    const result = runInit(home, SOURCES, { force: false, dryRun: false })
     assert.equal(result.ok, true)
-    assert.ok(existsSync(join(home, 'workflows', 'coding-workflow-rapid.yaml')))
+    assert.deepEqual(WORKFLOW_IDS, ['development-workflow'])
+    assert.deepEqual(readdirSync(join(home, 'workflows')), ['development-workflow.yaml'])
     assert.ok(existsSync(join(home, 'cordis.patch.yml')))
-    for (const id of FULL_WORKFLOW_IDS) {
-      if ((MINIMAL_WORKFLOW_IDS as readonly string[]).includes(id)) continue
-      assert.equal(existsSync(join(home, 'workflows', `${id}.yaml`)), false)
-    }
-  })
-
-  it('全量：装全部生产模板，遗留模板不在安装源内', () => {
-    const result = runInit(home, SOURCES, { full: true, force: false, dryRun: false })
-    assert.equal(result.ok, true)
-    for (const id of FULL_WORKFLOW_IDS) {
-      assert.ok(existsSync(join(home, 'workflows', `${id}.yaml`)), id)
-    }
     assert.match(result.text, /definitionHash=/)
   })
 
+  it('已有旧 catalog 在普通与 force 安装后字节不变', () => {
+    const legacy = join(home, 'workflows', 'coding-workflow-rapid.yaml')
+    const custom = '# 用户保留的旧模板\n'
+    writeFileSync(legacy, custom)
+    for (const force of [false, true]) {
+      assert.equal(runInit(home, SOURCES, { force, dryRun: false }).ok, true)
+      assert.equal(readFileSync(legacy, 'utf8'), custom)
+    }
+  })
+
   it('幂等：第二次跑全部 up-to-date', () => {
-    runInit(home, SOURCES, { full: true, force: false, dryRun: false })
-    const second = runInit(home, SOURCES, { full: true, force: false, dryRun: false })
+    runInit(home, SOURCES, { force: false, dryRun: false })
+    const second = runInit(home, SOURCES, { force: false, dryRun: false })
     assert.equal(second.ok, true)
     assert.match(second.text, /up-to-date/)
     assert.doesNotMatch(second.text, /installed|overwritten|skipped/)
   })
 
   it('用户文件：内容不同默认跳过并提示首个差异行；--force 备份后覆盖', () => {
-    runInit(home, SOURCES, { full: false, force: false, dryRun: false })
-    const target = join(home, 'workflows', 'coding-workflow-rapid.yaml')
+    runInit(home, SOURCES, { force: false, dryRun: false })
+    const target = join(home, 'workflows', 'development-workflow.yaml')
     writeFileSync(target, '# 用户手改\nid: custom\n', 'utf8')
-    const skipped = runInit(home, SOURCES, { full: false, force: false, dryRun: false })
+    const skipped = runInit(home, SOURCES, { force: false, dryRun: false })
     assert.equal(skipped.ok, true)
-    assert.match(skipped.text, /skipped workflows\/coding-workflow-rapid\.yaml/)
+    assert.match(skipped.text, /skipped workflows\/development-workflow\.yaml/)
     assert.match(skipped.text, /第 1 行不同/)
     assert.equal(readFileSync(target, 'utf8').startsWith('# 用户手改'), true)
-    const forced = runInit(home, SOURCES, { full: false, force: true, dryRun: false })
-    assert.match(forced.text, /overwritten workflows\/coding-workflow-rapid\.yaml/)
+    const forced = runInit(home, SOURCES, { force: true, dryRun: false })
+    assert.match(forced.text, /overwritten workflows\/development-workflow\.yaml/)
     assert.match(forced.text, /\.bak-\d+/)
     assert.equal(readFileSync(target, 'utf8').startsWith('# 用户手改'), false)
   })
 
   it('--dry-run：零写入但报告 would-install', () => {
-    const result = runInit(home, SOURCES, { full: false, force: false, dryRun: true })
+    const result = runInit(home, SOURCES, { force: false, dryRun: true })
     assert.equal(result.ok, true)
     assert.match(result.text, /would-install/)
-    assert.equal(existsSync(join(home, 'workflows', 'coding-workflow-rapid.yaml')), false)
+    assert.equal(existsSync(join(home, 'workflows', 'development-workflow.yaml')), false)
     assert.equal(existsSync(join(home, 'cordis.patch.yml')), false)
   })
 
   it('preset 合并：保留用户原有行，只追加声明', () => {
     writeFileSync(join(home, 'cordis.patch.yml'), '- name: user-plugin\n', 'utf8')
-    const result = runInit(home, SOURCES, { full: false, force: false, dryRun: false })
+    const result = runInit(home, SOURCES, { force: false, dryRun: false })
     assert.equal(result.ok, true)
     const text = readFileSync(join(home, 'cordis.patch.yml'), 'utf8')
     assert.match(text, /user-plugin/)
@@ -101,7 +101,7 @@ describe('runInit', () => {
     writeFileSync(join(home, 'cordis.patch.yml'),
       '- name: user-plugin\n  config:\n    flag: !!js process.platform === \'linux\'\n'
       + '- insert:\n    - id: preset-manager\n      name: old\n', 'utf8')
-    const result = runInit(home, SOURCES, { full: false, force: true, dryRun: false })
+    const result = runInit(home, SOURCES, { force: true, dryRun: false })
     assert.equal(result.ok, true)
     assert.match(result.text, /overwritten cordis\.patch\.yml/)
     const text = readFileSync(join(home, 'cordis.patch.yml'), 'utf8')
@@ -113,7 +113,7 @@ describe('runInit', () => {
 
   it('preset --force：顶层单声明替换同样保 tag', () => {
     writeFileSync(join(home, 'cordis.patch.yml'), '- id: preset-manager\n  name: old\n', 'utf8')
-    const result = runInit(home, SOURCES, { full: false, force: true, dryRun: false })
+    const result = runInit(home, SOURCES, { force: true, dryRun: false })
     assert.equal(result.ok, true)
     const text = readFileSync(join(home, 'cordis.patch.yml'), 'utf8')
     assert.match(text, /disabled: !!js process\.platform === 'win32'/)
@@ -141,12 +141,13 @@ describe('scripts/dsh-workflow-init.mjs 薄封装', () => {
     try {
       const minimal = spawnSync(process.execPath, [script, '--dry-run', '--home', home], { encoding: 'utf8' })
       assert.equal(minimal.status, 0, minimal.stderr)
-      assert.match(minimal.stdout, /would-install workflows\/coding-workflow-rapid\.yaml/)
+      assert.match(minimal.stdout, /would-install workflows\/development-workflow\.yaml/)
       assert.match(minimal.stdout, /would-install cordis\.patch\.yml/)
       assert.deepEqual(readdirSync(home), [], '预演不得写入任何文件')
       const full = spawnSync(process.execPath, [script, '--full', '--dry-run', '--home', home], { encoding: 'utf8' })
-      assert.equal(full.status, 0, full.stderr)
-      for (const id of FULL_WORKFLOW_IDS) assert.match(full.stdout, new RegExp(`would-install workflows/${id}\\.yaml`), id)
+      assert.equal(full.status, 2, full.stderr)
+      assert.match(full.stderr, /未知参数 "--full"/)
+      assert.deepEqual(readdirSync(home), [], '--full 必须在写入前拒绝')
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
