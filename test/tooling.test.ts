@@ -102,6 +102,9 @@ test('#101 诊断：未知布局与坏库分别诊断且不改写', () => {
 test('#101 隔离 bundle：元数据取自 package.json 且不含 DSH 宿主包', () => {
   const manifest = bundlePackageJson(repoPackage)
   assert.equal(manifest.version, repoPackage.version)
+  for (const key of ['name', 'description', 'engines', 'repository', 'homepage', 'bugs', 'author', 'keywords']) {
+    assert.deepEqual(manifest[key], repoPackage[key], `${key} 必须随发行 bundle 保留`)
+  }
   assert.deepEqual(manifest.dependencies, repoPackage.dependencies)
   assert.deepEqual(Object.keys(manifest.dependencies).sort(), ['yaml', 'zod'])
   assert.equal(Object.keys(manifest).includes('devDependencies'), false)
@@ -120,6 +123,9 @@ test('#101 隔离 bundle：deployBundle 只写隔离目标，产物版本/依赖
     writeFileSync(join(fakeRepo, 'lib', 'nested', 'x.js'), 'export {}\n')
     writeFileSync(join(fakeRepo, 'cordis.patch.yml'), '- insert: { id: dsh-agent-team-workflow }\n')
     writeFileSync(join(fakeRepo, 'package.json'), JSON.stringify(repoPackage, null, 2))
+    for (const name of ['README.md', 'LICENSE']) {
+      writeFileSync(join(fakeRepo, name), readFileSync(join(repoRoot, name), 'utf8'))
+    }
     // dsh.client 声明要求随部署携带 ./client bundle（宿主扫描 fail-loud，此处同语义）。
     mkdirSync(join(fakeRepo, 'web-client', 'dist'), { recursive: true })
     writeFileSync(join(fakeRepo, 'web-client', 'dist', 'client.js'), '/* stub client */\n')
@@ -154,6 +160,27 @@ test('#101 隔离 bundle：deployBundle 只写隔离目标，产物版本/依赖
     const bundleSources = resolveInitSources(target)
     assert.deepEqual(bundleSources.workflows.map(item => item.id).sort(), [...WORKFLOW_IDS].sort())
     assert.match(readFileSync(bundleSources.presetFile, 'utf8'), /preset-manager/)
+    // 实际 npm 文件选择边界：两种布局均可 init，staging 残留/源码/脚本不能入包。
+    for (const [root, template] of [[fakeRepo, 'docs/example/development-workflow.yaml'], [target, 'resources/workflows/development-workflow.yaml']]) {
+      mkdirSync(join(root, 'scripts'), { recursive: true })
+      writeFileSync(join(root, 'scripts', 'private.mjs'), '/* not for distribution */')
+      writeFileSync(join(root, 'old-release.tgz'), 'old archive')
+      mkdirSync(join(root, 'resources', 'workflows'), { recursive: true })
+      writeFileSync(join(root, 'resources', 'workflows', 'stale.yaml'), '# not installed')
+      const packed = process.platform === 'win32'
+        ? spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', 'npm pack --dry-run --json --ignore-scripts --offline'], { cwd: root, encoding: 'utf8' })
+        : spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts', '--offline'], { cwd: root, encoding: 'utf8' })
+      assert.equal(packed.status, 0, packed.stderr || String(packed.error))
+      const [archive] = JSON.parse(packed.stdout)
+      const paths = archive.files.map(file => file.path)
+      for (const required of ['lib/index.js', 'web-client/dist/client.js', 'cordis.patch.yml', 'resources/preset-manager.patch.yml', template, 'README.md', 'LICENSE', 'package.json']) {
+        assert.ok(paths.includes(required), `npm pack 必须包含 ${required} (${root})`)
+      }
+      assert.deepEqual(paths.filter(path => path.endsWith('.yaml')), [template], '只发唯一默认模板')
+      assert.equal(paths.some(path => /(?:^scripts\/|custom\.txt$|stale\.yaml$|\.tgz$)/.test(path)), false, '白名单拒绝 staging 残留和开发文件')
+      assert.equal(archive.name, repoPackage.name)
+      assert.equal(archive.version, repoPackage.version)
+    }
     // #209：缺内置资源时 fail-closed（与 client bundle 缺失同语义）。
     rmSync(join(fakeRepo, 'resources'), { recursive: true, force: true })
     assert.throws(() => deployBundle({ repoRoot: fakeRepo, target: join(dir, 'no-resources') }), /preset-manager\.patch\.yml missing/)

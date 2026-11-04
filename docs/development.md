@@ -21,6 +21,7 @@ The server is TypeScript ESM. The runtime loads compiled JavaScript, not source 
 | --- | --- |
 | `pnpm run build` | Compile the server |
 | `node web-client/build.mjs` | Build the Web client |
+| `pnpm run pack:release` | Build both, generate the isolated bundle and pack a local candidate tgz (no publish/deploy) |
 | `pnpm run verify` | Typecheck, full suite and both controlled smokes |
 | `pnpm test` | Run tests with the standard node:test isolation |
 | `pnpm run test:suite` | Run the full suite with process isolation disabled |
@@ -43,7 +44,30 @@ Use a dedicated output directory, never the source checkout or profile root. Thi
 
 Runtime dependencies are `yaml` and `zod`. Host API packages remain development dependencies; at runtime they resolve from the DSH installation rather than bundling another host instance.
 
-**Packaging is not yet a complete npm-release path.** The root publish allowlist omits init resources; the generated bundle includes them but currently omits compatibility metadata (`engines`) and documentation/license files. The [installation guide](<getting-started.en.md>) uses a local bundle and states the compatibility prerequisites explicitly. Before public distribution, fix and inspect the final archive, include the license and documentation, then test installation into an isolated profile. Do not infer publish readiness from a successful TypeScript build or `npm pack` exit code.
+## Pack a local release candidate
+
+```sh
+pnpm run pack:release
+```
+
+This single entry runs the server build, client build, existing [bundle generator](<../scripts/deploy-web.mjs>) with `--out .scratch/release`, then `npm pack ./.scratch/release --pack-destination .scratch`. The current candidate is `.scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz`; both staging and archives are Git-ignored. Output is outside staging, and a strict package `files` allowlist excludes old archives, scripts, source and unrelated staging files. No dependencies are added; nothing is published or deployed and no DSH configuration is changed.
+
+The root [development manifest](<../package.json>) owns version, description, engines, repository, homepage, bugs, author, keywords and runtime dependencies. The generator selects these fields without copying development dependencies or scripts into the bundle manifest. It copies README / LICENSE plus the existing server, client, patch and init resources. The single installed template comes from `WORKFLOW_IDS`; the four advanced examples stay in the source repository.
+
+The root package and generated bundle are both installable after both builds, but use different existing init layouts:
+
+| Package | Template location | Build behavior |
+| --- | --- | --- |
+| Root `npm pack` | `docs/example/development-workflow.yaml` plus `resources/preset-manager.patch.yml` | Uses existing artifacts; does **not** build |
+| Recommended `pnpm run pack:release` | `resources/workflows/development-workflow.yaml` plus the same preset | Always builds server and client before staging |
+
+Do not directly install a Git checkout or interpret a successful build / pack as publication approval. The package has not been published yet. Before distribution, inspect the actual tgz and install that exact file in an isolated DSH home/profile with no fallback to the source checkout; verify plugin load, client discovery, `init --dry-run`, `init`, `list` and `check development-workflow`. Keep this separate from controlled smoke and real-model evidence. The [installation guide](<getting-started.en.md>) documents the local tgz route.
+
+Focused packaging regression (uses `npm pack --dry-run`, creates no tgz, never touches a real profile):
+
+```sh
+node --test --test-isolation=none test/tooling.test.ts
+```
 
 ## Code map
 

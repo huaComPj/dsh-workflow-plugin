@@ -13,7 +13,9 @@
   "files": [
     "lib",
     "web-client/dist",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "resources/preset-manager.patch.yml",
+    "docs/example/development-workflow.yaml"
   ],
   "dsh": {
     "bundle": {
@@ -33,7 +35,8 @@
     "test:e2e": "node scripts/e2e-smoke.mjs",
     "test:smoke": "node scripts/t3-smoke.mjs && node scripts/e2e-smoke.mjs",
     "verify": "pnpm run typecheck && pnpm run test:suite && pnpm run test:smoke",
-    "deploy:web": "node scripts/deploy-web.mjs"
+    "deploy:web": "node scripts/deploy-web.mjs",
+    "pack:release": "pnpm run build && node web-client/build.mjs && node scripts/deploy-web.mjs --out .scratch/release && npm pack ./.scratch/release --pack-destination .scratch"
   },
   "dependencies": {
     "yaml": "^2.9.0",

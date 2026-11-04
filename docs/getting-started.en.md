@@ -2,7 +2,7 @@
 
 [Back to README](<../README.en.md>) · [中文](<getting-started.md>)
 
-This guide uses **a source build installed as a local bundle**. The npm package has not been published yet; installation by package name is not an available distribution path at this stage.
+This guide uses **a source build installed as a local candidate tgz**. The npm package has not been published yet; installation by package name is not an available distribution path at this stage.
 
 ## 1. Prerequisites
 
@@ -27,40 +27,39 @@ Run these commands **one at a time** from the directory where you want to keep t
 git clone https://github.com/hua0424/dsh-workflow-plugin.git
 cd dsh-workflow-plugin
 pnpm install
-pnpm run build
-node web-client/build.mjs
-node scripts/deploy-web.mjs --out ../dsh-workflow-bundle
+pnpm run pack:release
 ```
 
-Use `../dsh-workflow-bundle` only as a dedicated output directory, empty on first use. The generator replaces build files inside it. **Never point it at your source checkout, DSH home or profile root.**
+This builds the server and Web client, reuses the bundle generator at Git-ignored `.scratch/release`, then runs `npm pack` to create `.scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz`. Repeating it replaces same-version local artifacts. It does not publish, install or change a DSH profile.
 
-Install the generated bundle from the current source directory:
+Install the generated tgz from the current source directory (**this is the first step that changes the selected profile and requires your authorization**):
 
 **PowerShell**
 
 ```powershell
-$bundle = (Resolve-Path ../dsh-workflow-bundle).Path -replace '\\', '/'
-dsh plugin --profile web add "file:$bundle"
+$tgz = (Resolve-Path .scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz).Path -replace '\\', '/'
+dsh plugin --profile web add "file:$tgz"
 ```
 
 **macOS / Linux shell**
 
 ```sh
-bundle="$(cd ../dsh-workflow-bundle && pwd)"
-dsh plugin --profile web add "file:$bundle"
+tgz="$(pwd)/.scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz"
+dsh plugin --profile web add "file:$tgz"
 ```
 
-Keep the bundle directory as the source of your local dependency. Start or restart DSH Web, then refresh the browser:
+Keep the tgz as the source of your local dependency and for repeatable checks. Start or restart DSH Web, then refresh the browser:
 
 ```sh
 dsh web
 ```
 
-> **Current packaging limitations**
+> **Package contents and installation boundaries**
 >
-> - The root [package manifest](<../package.json>) omits init resources from its publish allowlist and has no automatic build hook. Do not install the Git source or a root-level `npm pack` archive directly.
-> - The [bundle generator](<../scripts/deploy-web.mjs>) includes server and client artifacts, the Manager preset and general development workflow template. Its generated manifest currently omits `engines`, so check Node / DSH versions yourself rather than relying on automatic compatibility enforcement.
-> - Running the deployment script without `--out` writes a development bundle under the default user home. It does not install dependencies or register the profile for a first installation; this guide deliberately avoids that path.
+> - The candidate includes compiled server and Web client, Cordis patch, Manager preset, the single default `development-workflow` template, README and MIT LICENSE. It preserves Node / DSH `engines` and full project metadata. Runtime dependencies are only `yaml` / `zod`; host packages are not installed with the plugin.
+> - After building both server and client, root-level `npm pack` also supports complete `init`, using the repository template layout. The recommended entry packs a lean bundle with templates under `resources/workflows` and always builds first. See the [development guide](<development.md>).
+> - Creating a `.tgz` does not prove isolated-host acceptance or npm publication. Installation and `init` are separate configuration-writing steps. Do not install the Git source directly or confuse packing with deployment.
+> - Running the deployment script without `--out` writes a development bundle under the default user home. It does not install dependencies or register the profile; this guide deliberately avoids that path.
 
 ## 3. Initialize templates and the Manager
 
@@ -108,9 +107,9 @@ Only one active Run is allowed per project workspace. BLOCK means that intervent
 
 ## Updates and troubleshooting
 
-- **Update the plugin:** preserve your configuration, update the source, rebuild both server and client, regenerate the dedicated bundle, then install the update through the plugin manager. Restart DSH and refresh the browser; source edits alone do not update the loaded plugin.
+- **Update the plugin:** preserve your configuration, update the source, rerun `pnpm run pack:release`, then install the new tgz through the plugin manager. Restart DSH and refresh the browser; source edits alone do not update the loaded plugin.
 - **Missing commands or UI:** check that you installed into `web`, built the client, loaded the plugin and restarted/refreshed.
-- **Init reports missing resources:** generate the complete bundle again. Copying only server artifacts or packing the repository root is not sufficient.
+- **Init reports missing resources:** rerun the release entry and install the new tgz. Do not copy only server artifacts or reuse older archives that lacked init resources.
 - **Invalid template or unavailable route:** read the `list` and `check` diagnostics and follow the [configuration reference](<example/README.md>) (Chinese) before starting.
 - **Initialize a different directory:** from the source checkout, use `node scripts/dsh-workflow-init.mjs --home <directory> --dry-run`. Remove `--dry-run` to write. This shares the conversation command's semantics, but is neither a global executable nor a plugin-package installer.
 

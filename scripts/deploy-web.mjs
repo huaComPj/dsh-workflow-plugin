@@ -34,9 +34,18 @@ export function bundlePackageJson(pkg) {
     type: pkg.type,
     main: pkg.main,
     license: pkg.license,
+    description: pkg.description,
+    engines: pkg.engines,
+    repository: pkg.repository,
+    homepage: pkg.homepage,
+    bugs: pkg.bugs,
+    author: pkg.author,
+    keywords: pkg.keywords,
     dependencies,
     exports: pkg.exports,
     dsh: pkg.dsh,
+    files: ['lib', 'web-client/dist/client.js', 'cordis.patch.yml', 'resources/preset-manager.patch.yml',
+      ...WORKFLOW_IDS.map(id => `resources/workflows/${id}.yaml`)],
   }
 }
 
@@ -75,6 +84,9 @@ export function deployBundle({ repoRoot, target }) {
       throw new Error(`docs/example/${id}.yaml missing — cannot ship init resources`)
     }
     cpSync(src, join(target, 'resources', 'workflows', `${id}.yaml`))
+  }
+  for (const name of ['README.md', 'LICENSE']) {
+    cpSync(join(repoRoot, name), join(target, name))
   }
   writeFileSync(join(target, 'package.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8')
   return { target, manifest }

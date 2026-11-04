@@ -2,7 +2,7 @@
 
 [返回首页](<../README.md>) · [English](<getting-started.en.md>)
 
-本指南使用**源码构建 → 本地 bundle 安装**。当前尚未发布 npm 包；不要把按包名安装当作已经可用的分发渠道。
+本指南使用**源码构建 → 本地候选 tgz 安装**。当前尚未发布 npm 包；不要把按包名安装当作已经可用的分发渠道。
 
 ## 1. 准备环境
 
@@ -27,40 +27,39 @@ pnpm --version
 git clone https://github.com/hua0424/dsh-workflow-plugin.git
 cd dsh-workflow-plugin
 pnpm install
-pnpm run build
-node web-client/build.mjs
-node scripts/deploy-web.mjs --out ../dsh-workflow-bundle
+pnpm run pack:release
 ```
 
-`../dsh-workflow-bundle` 必须是专用于此插件的输出目录，首次使用空目录。生成器会替换其内部构建文件，**不要指向源码目录、DSH home 或 profile 根目录**。
+该入口先构建后端和 Web 客户端，复用 bundle 生成器写入被 Git 忽略的 `.scratch/release`，再用 `npm pack` 将候选包写到 `.scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz`。重复执行会更新同版本本地产物；它不发布、不安装，也不修改 DSH profile。
 
-从当前源码目录安装刚生成的 bundle：
+从当前源码目录安装刚生成的 tgz（**只有这一步开始修改所选 profile，需要自行授权**）：
 
 **PowerShell**
 
 ```powershell
-$bundle = (Resolve-Path ../dsh-workflow-bundle).Path -replace '\\', '/'
-dsh plugin --profile web add "file:$bundle"
+$tgz = (Resolve-Path .scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz).Path -replace '\\', '/'
+dsh plugin --profile web add "file:$tgz"
 ```
 
 **macOS / Linux shell**
 
 ```sh
-bundle="$(cd ../dsh-workflow-bundle && pwd)"
-dsh plugin --profile web add "file:$bundle"
+tgz="$(pwd)/.scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz"
+dsh plugin --profile web add "file:$tgz"
 ```
 
-保留该 bundle 目录，作为本地依赖的来源。安装完成后启动或重启 DSH Web，并刷新浏览器：
+保留该 tgz，作为本地依赖与复验的来源。安装完成后启动或重启 DSH Web，并刷新浏览器：
 
 ```sh
 dsh web
 ```
 
-> **当前打包限制**
+> **包内容与安装边界**
 >
-> - 根 [package.json](<../package.json>) 的发布清单未包含 init 资源，也没有自动构建钩子。不要直接安装 Git 源码或根目录的 `npm pack` 产物。
-> - [bundle 生成器](<../scripts/deploy-web.mjs>)会带上前后端产物、Manager preset 和通用开发工作流模板，但当前生成的 manifest 不带 `engines`。请自行核对上述 Node / DSH 版本，不要依赖自动兼容性拦截。
-> - 不带 `--out` 的部署脚本写入默认用户目录下的开发 bundle，且不负责首次安装所需的依赖和 profile 注册；不用于本指南的首次安装。
+> - 候选包包含编译后的后端、Web 客户端、Cordis patch、Manager preset、唯一默认模板 `development-workflow`、README 与 MIT LICENSE；保留 Node / DSH `engines` 和完整项目元数据。运行依赖仅 `yaml` / `zod`，宿主包不随插件安装。
+> - 根开发包也可在双构建后 `npm pack`，模板使用仓库布局；推荐入口打包的是精简 bundle，模板使用 `resources/workflows` 布局。两者均支持完整 `init`；根目录打包不负责构建，推荐入口会强制双构建。详见[开发指南](<development.md>)。
+> - `.tgz` 生成成功不代表已通过隔离宿主验收或已经 npm 发布。安装与 `init` 是独立写配置步骤。不要直接安装 Git 源码，也不要把打包命令当作部署命令。
+> - 不带 `--out` 的部署脚本写入默认用户目录下的开发 bundle，且不负责首次安装所需的依赖和 profile 注册；不用于本指南。
 
 ## 3. 初始化模板与 Manager
 
@@ -108,9 +107,9 @@ dsh web
 
 ## 更新与排障
 
-- **更新插件**：保留自己的配置，更新源码后重新构建前后端、生成专用 bundle，再通过插件管理命令安装更新；重启 DSH 并刷新页面。不要假定源码改动会自动更新已加载插件。
+- **更新插件**：保留自己的配置，更新源码后重新运行 `pnpm run pack:release`，再通过插件管理命令安装新 tgz；重启 DSH 并刷新页面。不要假定源码改动会自动更新已加载插件。
 - **命令不存在 / 界面未出现**：确认安装的是 `web` profile，前端构建成功，插件已加载，并已重启与刷新。
-- **init 提示缺资源**：重新生成完整 bundle，不要只复制后端或使用根目录打包结果。
+- **init 提示缺资源**：重新运行打包入口并安装新 tgz，不要只复制后端或使用此前不含资源的旧包。
 - **模板无效 / 路由不可用**：看 `list`、`check` 的诊断，按[配置参考](<example/README.md>)修正；不要直接启动未知路由。
 - **需要指定初始化目录**：在源码仓库使用 `node scripts/dsh-workflow-init.mjs --home <目录> --dry-run`；去掉 `--dry-run` 才写入。它与对话命令共享语义，但不是全局可执行命令，也不安装插件包。
 
