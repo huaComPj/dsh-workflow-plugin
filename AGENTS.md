@@ -109,7 +109,7 @@ Engine invariants（改动 engine/state 前必读，详见 CONTEXT.md）：
 
 ### Issue tracker
 
-Issues and specs live as GitHub issues in `hua0424/dsh-workflow-plugin`; managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues and specs live as GitHub issues in `huaComPj/dsh-workflow-plugin`; managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

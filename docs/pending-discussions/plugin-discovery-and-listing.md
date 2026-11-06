@@ -3,6 +3,8 @@
 > 调查日期：2026-11-06（北京时间）。仅调查、撰写本文；未 push、未修改 GitHub description/topics、未创建 PR/Issue、未发布新 npm 版本或 GitHub Release、未安装插件或启动 Web/部署。
 > 对象：npm 包 `dsh-agent-team-workflow`；GitHub 仓库 `hua0424/dsh-workflow-plugin`。两者名字不同不构成收录障碍，关键在包的 `repository` 与实际仓库对应。
 
+> **迁移执行更新（2026-11-06）**：仓库现为 `huaComPj/dsh-workflow-plugin`；既有本地提交已推送，About、主页与 `dsh-plugin` 等 Topics 已设置。下文原始调查快照中的 `hua0424` 链接和当时状态保留为历史，不代表当前待办；投稿草稿及复验命令改用新身份。源码 manifest 与当前 README 链接会同步新地址，但已发布 npm rc.1 的 `repository` 不会自动改写，目录的 npm 自动关联仍需另外核对。
+
 ## 一、结论先行
 
 **当前不存在“按某种方式发布 GitHub 仓库，就会被 DeepSeek Harness 官方自动收录”的机制或承诺。** 最新官方默认分支文档明确写着：
@@ -111,11 +113,11 @@ GitHub 仓库元数据、registry、索引线上结果会变化；正文规则�
 
 ### 4.3 本项目投稿草稿（尚未创建任何外部文件/PR）
 
-拟新增的唯一条目名：`data/plugins/hua0424__dsh-workflow-plugin.yml`。
+拟新增的唯一条目名（迁移后）：`data/plugins/huaComPj__dsh-workflow-plugin.yml`。
 
 ```yaml
-url: https://github.com/hua0424/dsh-workflow-plugin
-name: hua0424/dsh-workflow-plugin
+url: https://github.com/huaComPj/dsh-workflow-plugin
+name: huaComPj/dsh-workflow-plugin
 category: workflow
 description:
   en: Configurable serial agent-team workflows with Manager coordination, role actors, independent judging, and a visual workflow editor.
@@ -197,9 +199,9 @@ gh api repos/deepseek-ai/deepseek-harness --jq '.default_branch'
 gh api repos/deepseek-ai/deepseek-harness/commits/master --jq '.sha'
 gh api repos/deepseek-ai/deepseek-harness/contents/docs/user/guide/plugin-market.zh.md -H 'Accept: application/vnd.github.raw+json'
 gh api repos/awesome-dsh-plugin/awesome-dsh-plugin/contents/contributing.md -H 'Accept: application/vnd.github.raw+json'
-gh api repos/hua0424/dsh-workflow-plugin --jq '{description,homepage,topics,private,archived,created_at}'
-gh api repos/hua0424/dsh-workflow-plugin/commits/main --jq '.sha'
-gh api repos/hua0424/dsh-workflow-plugin/releases --jq '[.[] | {tag_name,published_at,prerelease}]'
+gh api repos/huaComPj/dsh-workflow-plugin --jq '{description,homepage,topics,private,archived,created_at}'
+gh api repos/huaComPj/dsh-workflow-plugin/commits/main --jq '.sha'
+gh api repos/huaComPj/dsh-workflow-plugin/releases --jq '[.[] | {tag_name,published_at,prerelease}]'
 Invoke-RestMethod https://registry.npmjs.org/dsh-agent-team-workflow/0.2.1-rc.1
 ```
 

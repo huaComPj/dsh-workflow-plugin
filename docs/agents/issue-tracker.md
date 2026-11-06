@@ -1,19 +1,19 @@
 # Issue tracker: GitHub
 
-Issues and specs for this repo live as GitHub issues in `hua0424/dsh-workflow-plugin`. Use the `gh` CLI for GitHub operations. Check the current clone's remote identity before acting; pass `--repo hua0424/dsh-workflow-plugin` explicitly rather than relying on the working directory.
+Issues and specs for this repo live as GitHub issues in `huaComPj/dsh-workflow-plugin`. Use the `gh` CLI for GitHub operations. Check the current clone's remote identity before acting; pass `--repo huaComPj/dsh-workflow-plugin` explicitly rather than relying on the working directory.
 
 ## Conventions
 
 Use non-interactive flags. For multi-line issue bodies, comments or PR descriptions, write the exact text to a temporary file and pass `--body-file`; preserve newlines and avoid shell interpolation. Do not print credentials or include sensitive logs in remote records.
 
 ```text
-gh issue create --repo hua0424/dsh-workflow-plugin --title "..." --body-file <file>
-gh issue view <number> --repo hua0424/dsh-workflow-plugin --json number,title,body,labels,state,url,comments
-gh issue list --repo hua0424/dsh-workflow-plugin --state open --json number,title,labels,url
-gh issue comment <number> --repo hua0424/dsh-workflow-plugin --body-file <file>
-gh issue edit <number> --repo hua0424/dsh-workflow-plugin --add-label "..."
-gh issue edit <number> --repo hua0424/dsh-workflow-plugin --remove-label "..."
-gh issue close <number> --repo hua0424/dsh-workflow-plugin
+gh issue create --repo huaComPj/dsh-workflow-plugin --title "..." --body-file <file>
+gh issue view <number> --repo huaComPj/dsh-workflow-plugin --json number,title,body,labels,state,url,comments
+gh issue list --repo huaComPj/dsh-workflow-plugin --state open --json number,title,labels,url
+gh issue comment <number> --repo huaComPj/dsh-workflow-plugin --body-file <file>
+gh issue edit <number> --repo huaComPj/dsh-workflow-plugin --add-label "..."
+gh issue edit <number> --repo huaComPj/dsh-workflow-plugin --remove-label "..."
+gh issue close <number> --repo huaComPj/dsh-workflow-plugin
 ```
 
 Read precise issue/comment links and relevant fields first. Use appropriate filters; default list limits do not prove completeness. When claiming all matching issues or comments were checked, paginate through the whole relevant result set. Before retrying a write whose outcome is unknown, query GitHub to avoid duplicate resources or comments.

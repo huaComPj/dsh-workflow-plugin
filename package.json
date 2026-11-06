@@ -86,12 +86,12 @@
   "author": "hua0424",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hua0424/dsh-workflow-plugin.git"
+    "url": "git+https://github.com/huaComPj/dsh-workflow-plugin.git"
   },
   "bugs": {
-    "url": "https://github.com/hua0424/dsh-workflow-plugin/issues"
+    "url": "https://github.com/huaComPj/dsh-workflow-plugin/issues"
   },
-  "homepage": "https://github.com/hua0424/dsh-workflow-plugin#readme",
+  "homepage": "https://github.com/huaComPj/dsh-workflow-plugin#readme",
   "keywords": [
     "dsh",
     "deepseek-harness",
