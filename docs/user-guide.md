@@ -20,7 +20,17 @@
 
 ## 2. 安装 / 部署 / 升级
 
-首次安装请按[安装与上手](<getting-started.md>)完成前后端构建、完整 bundle 生成与 Web profile 注册。下面只说明已有开发部署（`wfdev`）的更新路径，不代替首次安装；**部署是需你显式授权的动作**。只想核对产物时用隔离生成（`--out`，不写 `~/.dsh`）：
+普通安装与升级使用 npm 已发布的准确版本，无需克隆源码、构建或登录 npm：
+
+```sh
+dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
+```
+
+已有实例时先结束活动任务并停止对应实例，再安装、重启并刷新。首次安装后在 DSH 对话依次执行 `/dsh-flow init --dry-run`、`/dsh-flow init`，再重启以加载新增 preset；完整步骤见[安装与上手](<getting-started.md>)。自定义 `DSH_HOME` 全程保持一致，切换开发版时避免重复加载两份插件并保留用户配置。维护者升版、打包和重新发布见[更新与发布](<releasing.md>)。
+
+### 开发部署（非普通安装流程）
+
+下面仅适用于已有开发部署（`wfdev`），不代替 npm 安装，也不会发布 npm 包；**部署是需你显式授权的动作**。只想核对产物时用隔离生成（`--out`，不写 `~/.dsh`）：
 
 ```bash
 pnpm run build                              # tsc 编译到 lib/（部署前必须）
@@ -35,7 +45,7 @@ bundle `package.json` 的必要字段（version / dependencies / dsh / main / ty
 生成步骤直接失败。`--out` 必须带目录值：漏写（`--out` 为末位）只打印用法并以 2 退出，**不会**回落到
 `~/.dsh` 的真实部署目标。注意：每次 build 后都要重跑 deploy；bundle 成员变更后必须重启 DSH。
 
-**版本兼容声明（#207 发布前决策）**：本插件需要 DSH 宿主 `>= 0.2.1-rc.2`（下限范围声明；包元数据 `package.json` 的 `engines.dsh`、本手册与总览 `README.md` 三处统一表述，验收基线为 exact `0.2.1-rc.2`）。版本号保持 `package.json` 当前值，不随本轮对齐递增。
+**版本兼容声明**：本插件需要 Node.js `>= 22.19.0`、DSH 宿主 `>= 0.2.1-rc.2`，与包元数据及首页一致。首发本地候选在 DSH `0.2.1-rc.2` 验证；2026-11-06 公开 registry 全新安装复验使用 Windows + Node.js `24.16.0` + DSH `0.2.1-rc.5`。这不是全部平台和版本组合的通过承诺。
 
 **版本兼容提示**：dsh ≥ 0.1.1-rc.7 起 `compaction` 服务不再挂载在宿主平面，
 插件已改为运行期按 agent 解析（`host.ts` 的 `compactionFor`），不要在模块级

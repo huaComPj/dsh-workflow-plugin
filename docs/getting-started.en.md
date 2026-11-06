@@ -2,14 +2,14 @@
 
 [Back to README](<../README.en.md>) · [中文](<getting-started.md>)
 
-This guide uses **a source build installed as a local candidate tgz**. The npm package has not been published yet; installation by package name is not an available distribution path at this stage.
+Install the publicly released **`dsh-agent-team-workflow@0.2.1-rc.1`** from npm. A fresh installation from the official registry has passed verification. Normal installation requires no source checkout, build, local tgz or npm login. For source development and local packaging, see the [development guide](<development.md>); maintainers should use the [release guide](<releasing.md>) (Chinese).
 
 ## 1. Prerequisites
 
 - Node.js **≥ 22.19** and DSH **≥ 0.2.1-rc.2**; Node.js 24 is recommended.
-- Git, pnpm and `dsh` on your PATH, plus at least one configured model in DSH.
-- The Web profile. Model usage is billed by your chosen provider.
-- If you use a custom `DSH_HOME`, keep it consistent during installation, initialization and startup.
+- `dsh` and pnpm on your PATH. A first installation does not require Git or the plugin source.
+- The Web profile. Configure at least one usable model in DSH **before running a workflow**; installing the plugin does not require a model first. Model usage is billed by your chosen provider.
+- If you use a custom `DSH_HOME`, keep it consistent throughout installation, initialization, every DSH start or restart, upgrades and troubleshooting.
 
 ```sh
 node --version
@@ -17,38 +17,33 @@ dsh --version
 pnpm --version
 ```
 
-When upgrading, let active tasks finish before stopping the relevant DSH instance. The installation command below changes your Web profile; building and generating with an explicit `--out` do not deploy to the live profile.
+The declared minimum versions remain as stated above. This fresh-install verification used **Windows + Node.js 24.16.0 + DSH 0.2.1-rc.5**; it does not establish coverage of every operating system, Node and DSH version combination.
 
-## 2. Build and install the plugin
+For an upgrade or a switch from a development build, let active tasks finish before stopping the relevant DSH instance. If the Web profile already registers a development bundle (such as `wfdev`) or local source installation, inspect and disable that old development registration before switching to npm. **Do not load two plugin instances.** Preserve custom presets, workflow configuration and state data; do not delete user resources to switch installations. The command below changes the selected Web profile.
 
-Run these commands **one at a time** from the directory where you want to keep the source. Stop on any failure rather than installing stale artifacts.
+## 2. Install from npm
+
+Run this from any directory; no source checkout is needed:
 
 ```sh
-git clone https://github.com/hua0424/dsh-workflow-plugin.git
-cd dsh-workflow-plugin
-pnpm install
-pnpm run pack:release
+dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
 ```
 
-This builds the server and Web client, reuses the bundle generator at Git-ignored `.scratch/release`, then runs `npm pack` to create `.scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz`. Repeating it replaces same-version local artifacts. It does not publish, install or change a DSH profile.
+Stop if the command fails and investigate the error instead of assuming installation succeeded. If you need to select the official npm registry explicitly, use an environment variable for this command only; do not change global npm/pnpm configuration:
 
-Install the generated tgz from the current source directory (**this is the first step that changes the selected profile and requires your authorization**):
-
-**PowerShell**
+**PowerShell (temporary child-process environment; leaves your current environment unchanged)**
 
 ```powershell
-$tgz = (Resolve-Path .scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz).Path -replace '\\', '/'
-dsh plugin --profile web add "file:$tgz"
+pwsh -NoProfile -Command '$env:npm_config_registry = "https://registry.npmjs.org"; dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1'
 ```
 
-**macOS / Linux shell**
+**macOS / Linux shell (applies only to this command)**
 
 ```sh
-tgz="$(pwd)/.scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz"
-dsh plugin --profile web add "file:$tgz"
+npm_config_registry=https://registry.npmjs.org dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
 ```
 
-Keep the tgz as the source of your local dependency and for repeatable checks. Start or restart DSH Web, then refresh the browser:
+These are alternatives for the same installation; choose one. A custom `DSH_HOME` must already be set in your current environment, which the child process inherits. Start or restart DSH Web, then refresh the browser:
 
 ```sh
 dsh web
@@ -56,10 +51,9 @@ dsh web
 
 > **Package contents and installation boundaries**
 >
-> - The candidate includes compiled server and Web client, Cordis patch, Manager preset, the single default `development-workflow` template, README and MIT LICENSE. It preserves Node / DSH `engines` and full project metadata. Runtime dependencies are only `yaml` / `zod`; host packages are not installed with the plugin.
-> - After building both server and client, root-level `npm pack` also supports complete `init`, using the repository template layout. The recommended entry packs a lean bundle with templates under `resources/workflows` and always builds first. See the [development guide](<development.md>).
-> - Creating a `.tgz` does not prove isolated-host acceptance or npm publication. Installation and `init` are separate configuration-writing steps. Do not install the Git source directly or confuse packing with deployment.
-> - Running the deployment script without `--out` writes a development bundle under the default user home. It does not install dependencies or register the profile; this guide deliberately avoids that path.
+> - The release includes compiled server and Web client, Cordis patch, Manager preset, the single default `development-workflow` template, README and MIT LICENSE. Runtime dependencies are only `yaml` / `zod`; host packages are not installed with the plugin.
+> - Installation and `init` are separate configuration-writing steps. Installing the npm package does not perform the initialization below.
+> - Local tgz packages, source builds and development deployment are not normal installation prerequisites. See the [development guide](<development.md>) if you need them. Packing is not installation or deployment.
 
 ## 3. Initialize templates and the Manager
 
@@ -107,10 +101,10 @@ Only one active Run is allowed per project workspace. BLOCK means that intervent
 
 ## Updates and troubleshooting
 
-- **Update the plugin:** preserve your configuration, update the source, rerun `pnpm run pack:release`, then install the new tgz through the plugin manager. Restart DSH and refresh the browser; source edits alone do not update the loaded plugin.
-- **Missing commands or UI:** check that you installed into `web`, built the client, loaded the plugin and restarted/refreshed.
-- **Init reports missing resources:** rerun the release entry and install the new tgz. Do not copy only server artifacts or reuse older archives that lacked init resources.
+- **Update the plugin:** first confirm that the target new version has been published to npm. Preserve your configuration, let active tasks finish and stop the relevant DSH instance, then install with `dsh plugin --profile web add package-name@exact-version`. Restart DSH and refresh the browser. An existing exact-version example is `dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1` (reinstalling this same version is not an upgrade). For a future upgrade, use a new version that has actually been published, not a made-up version number.
+- **Missing commands or UI:** check that you installed into `web`, used the same `DSH_HOME` for installation and startup, loaded the plugin without a duplicate development instance, and restarted/refreshed.
+- **Init reports missing resources:** check the loaded plugin version and installation errors, reinstall the complete published npm package and restart. Do not copy only server artifacts or substitute an old development build.
 - **Invalid template or unavailable route:** read the `list` and `check` diagnostics and follow the [configuration reference](<example/README.md>) (Chinese) before starting.
-- **Initialize a different directory:** from the source checkout, use `node scripts/dsh-workflow-init.mjs --home <directory> --dry-run`. Remove `--dry-run` to write. This shares the conversation command's semantics, but is neither a global executable nor a plugin-package installer.
+- **Source development or an offline local package:** see the [development guide](<development.md>); these are not first-time npm installation steps.
 
-See the [user guide](<user-guide.md>) (Chinese) for operations and the [development guide](<development.md>) for validation and packaging boundaries.
+See the [user guide](<user-guide.md>) (Chinese) for operations, the [development guide](<development.md>) for source validation and packaging, and the [release guide](<releasing.md>) (Chinese) for npm publishing.

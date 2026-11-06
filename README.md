@@ -44,13 +44,21 @@
 
 ## 安装与首次运行
 
-**要求：Node.js ≥ 22.19、DSH ≥ 0.2.1-rc.2，并已配置可用模型。** 从源码构建还需要 Git 和 pnpm；推荐使用 Node.js 24。
+**安装要求：Node.js ≥ 22.19、DSH ≥ 0.2.1-rc.2，推荐 Node.js 24。** 运行工作流前需配置可用模型；源码构建另需 Git 和 pnpm。
 
-当前尚未发布到 npm。先按[安装指南](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/getting-started.md>)运行 `pnpm run pack:release`，构建前后端并生成完整候选包，再安装本地 `.tgz`；此命令不发布、不部署或修改 DSH 配置。根目录 `npm pack` 的资源白名单也已完整，但不会自动构建，不能保证产物新鲜。
+从 npm 安装已发布版本，无需克隆源码、自己构建或登录 npm（需有可用的 `dsh`、`pnpm` 命令）：
 
-插件加载后，在 DSH 对话中执行：
+```sh
+dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
+dsh web
+```
+
+已有 DSH 实例时，先结束活动任务并停止对应实例；已有开发版注册时，先避免与 npm 版重复加载。安装完成后启动或重启 Web 并刷新浏览器。使用自定义 `DSH_HOME` 时，全程保持同一设置。版本选择、更新和源码安装见[安装指南](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/getting-started.md>)。
+
+插件加载后，在 DSH 对话中先预演，再初始化：
 
 ```text
+/dsh-flow init --dry-run
 /dsh-flow init
 ```
 
@@ -69,6 +77,7 @@
 - [使用手册](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/user-guide.md>)：命令、模型路由、恢复与故障排查。
 - [配置模板](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/example/README.md>)：角色、节点、结果分支与子流程。
 - [开发指南](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/development.md>)：构建、测试、架构与运行时文档入口。
+- [更新与发布](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/releasing.md>)：升版、候选包验收、npm 发布及发布后复验。
 - [问题反馈](https://github.com/hua0424/dsh-workflow-plugin/issues/new/choose)：附上版本、复现步骤和脱敏后的错误信息。
 
 ## 许可证

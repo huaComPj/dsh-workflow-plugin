@@ -44,13 +44,21 @@ The other four templates remain advanced examples and are not installed by `init
 
 ## Install and run
 
-**Requires Node.js ≥ 22.19, DSH ≥ 0.2.1-rc.2 and a configured model provider.** Building from source also requires Git and pnpm; Node.js 24 is recommended.
+**Installation requires Node.js ≥ 22.19 and DSH ≥ 0.2.1-rc.2; Node.js 24 is recommended.** Configure a working model provider before running workflows. Source builds additionally require Git and pnpm.
 
-The npm package is not published yet. Follow the [installation guide](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/getting-started.en.md>): `pnpm run pack:release` builds both server and client, then creates a complete local `.tgz` to install. It does not publish, deploy or modify DSH configuration. Root-level `npm pack` also includes init resources, but does not build first and may package stale artifacts.
+Install the published version from npm; no source checkout, local build or npm login is required (`dsh` and `pnpm` must be available):
 
-Once the plugin is loaded, run this in a DSH conversation:
+```sh
+dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
+dsh web
+```
+
+For an existing DSH instance, finish active tasks and stop that instance first. If a development build is registered, avoid loading it alongside the npm version. Start or restart Web after installation and refresh the browser. Keep the same custom `DSH_HOME` throughout, if used. See the [installation guide](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/getting-started.en.md>) for version selection, updates and source installation.
+
+Once the plugin is loaded, preview and then initialize it in a DSH conversation:
 
 ```text
+/dsh-flow init --dry-run
 /dsh-flow init
 ```
 
@@ -69,6 +77,7 @@ Restart DSH, create a project session with **团队工作流 Manager（通用）
 - [User guide](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/user-guide.md>) (Chinese): commands, model routes, recovery and troubleshooting.
 - [Template reference](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/example/README.md>) (Chinese): roles, nodes, result branches and subflows.
 - [Development guide](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/development.md>): build, tests, architecture and runtime documentation.
+- [Updating and publishing releases](<https://github.com/hua0424/dsh-workflow-plugin/blob/main/docs/releasing.md>) (Chinese): versioning, candidate acceptance, npm publication and registry re-verification.
 - [Report an issue](https://github.com/hua0424/dsh-workflow-plugin/issues/new/choose): include versions, reproduction steps and redacted errors.
 
 ## License

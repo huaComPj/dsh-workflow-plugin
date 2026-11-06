@@ -2,14 +2,14 @@
 
 [返回首页](<../README.md>) · [English](<getting-started.en.md>)
 
-本指南使用**源码构建 → 本地候选 tgz 安装**。当前尚未发布 npm 包；不要把按包名安装当作已经可用的分发渠道。
+推荐从 npm 安装已公开发布的 **`dsh-agent-team-workflow@0.2.1-rc.1`**；该版本已通过官方 registry 全新安装复验。普通安装无需克隆源码、构建或准备本地 tgz，也无需 npm 登录。源码开发与本地打包见[开发指南](<development.md>)，维护者发布流程见[发布指南](<releasing.md>)。
 
 ## 1. 准备环境
 
 - Node.js **≥ 22.19**、DSH **≥ 0.2.1-rc.2**；推荐 Node.js 24。
-- Git、pnpm、`dsh` 命令可用；DSH 中已配置至少一个可用模型。
-- 使用 Web profile。模型调用计费由所选 provider 决定。
-- 使用自定义 `DSH_HOME` 时，在安装、初始化和启动 DSH 时保持同一设置。
+- `dsh`、pnpm 命令可用；首次安装不要求 Git 或插件源码。
+- 使用 Web profile。**运行工作流前**须在 DSH 中配置至少一个可用模型；安装插件本身不要求先配置模型。模型调用计费由所选 provider 决定。
+- 使用自定义 `DSH_HOME` 时，在安装、初始化、每次启动或重启 DSH、升级和排障时全程保持同一设置。
 
 ```sh
 node --version
@@ -17,38 +17,33 @@ dsh --version
 pnpm --version
 ```
 
-升级已有安装时，先让活动任务结束，再停止对应 DSH 实例。下面的安装命令会修改 Web profile；构建和显式 `--out` 生成本身不会部署到真实 profile。
+兼容下限声明保持为上述版本；本次全新安装实测环境为 **Windows + Node.js 24.16.0 + DSH 0.2.1-rc.5**，不代表已验证全部操作系统、Node 与 DSH 版本组合。
 
-## 2. 构建并安装插件
+升级或从开发版切换时，先让活动任务结束，再停止对应 DSH 实例。若 Web profile 已注册开发 bundle（如 `wfdev`）或本地源码版，先核对并停用旧开发版注册，再切换到 npm 包，**不要同时加载两份插件实例**。保留自定义 preset、工作流配置和状态数据，不要为切换而删除用户资源。下面的安装命令会修改所选 Web profile。
 
-在准备存放源码的目录中，**逐条运行**下列命令；任何一步失败就停止，不要继续安装旧产物。
+## 2. 从 npm 安装插件
+
+在任意目录执行，不需要进入源码仓库：
 
 ```sh
-git clone https://github.com/hua0424/dsh-workflow-plugin.git
-cd dsh-workflow-plugin
-pnpm install
-pnpm run pack:release
+dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
 ```
 
-该入口先构建后端和 Web 客户端，复用 bundle 生成器写入被 Git 忽略的 `.scratch/release`，再用 `npm pack` 将候选包写到 `.scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz`。重复执行会更新同版本本地产物；它不发布、不安装，也不修改 DSH profile。
+命令失败就停止，先排查错误；不要继续假定安装成功。需要明确使用官方 npm registry 时，仅为本次命令设置环境变量，不修改用户全局 npm/pnpm 配置：
 
-从当前源码目录安装刚生成的 tgz（**只有这一步开始修改所选 profile，需要自行授权**）：
-
-**PowerShell**
+**PowerShell（在子进程中临时设置，退出后不影响当前环境）**
 
 ```powershell
-$tgz = (Resolve-Path .scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz).Path -replace '\\', '/'
-dsh plugin --profile web add "file:$tgz"
+pwsh -NoProfile -Command '$env:npm_config_registry = "https://registry.npmjs.org"; dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1'
 ```
 
-**macOS / Linux shell**
+**macOS / Linux shell（仅作用于这条命令）**
 
 ```sh
-tgz="$(pwd)/.scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz"
-dsh plugin --profile web add "file:$tgz"
+npm_config_registry=https://registry.npmjs.org dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
 ```
 
-保留该 tgz，作为本地依赖与复验的来源。安装完成后启动或重启 DSH Web，并刷新浏览器：
+以上是同一安装操作的替代写法，选择一种即可。自定义 `DSH_HOME` 必须已在当前环境中设置，子进程会继承它。安装完成后启动或重启 DSH Web，并刷新浏览器：
 
 ```sh
 dsh web
@@ -56,10 +51,9 @@ dsh web
 
 > **包内容与安装边界**
 >
-> - 候选包包含编译后的后端、Web 客户端、Cordis patch、Manager preset、唯一默认模板 `development-workflow`、README 与 MIT LICENSE；保留 Node / DSH `engines` 和完整项目元数据。运行依赖仅 `yaml` / `zod`，宿主包不随插件安装。
-> - 根开发包也可在双构建后 `npm pack`，模板使用仓库布局；推荐入口打包的是精简 bundle，模板使用 `resources/workflows` 布局。两者均支持完整 `init`；根目录打包不负责构建，推荐入口会强制双构建。详见[开发指南](<development.md>)。
-> - `.tgz` 生成成功不代表已通过隔离宿主验收或已经 npm 发布。安装与 `init` 是独立写配置步骤。不要直接安装 Git 源码，也不要把打包命令当作部署命令。
-> - 不带 `--out` 的部署脚本写入默认用户目录下的开发 bundle，且不负责首次安装所需的依赖和 profile 注册；不用于本指南。
+> - 发布包包含编译后的后端、Web 客户端、Cordis patch、Manager preset、唯一默认模板 `development-workflow`、README 与 MIT LICENSE。运行依赖仅 `yaml` / `zod`，宿主包不随插件安装。
+> - 安装与 `init` 是独立写配置步骤；安装 npm 包不会替你完成下节初始化。
+> - 本地 tgz、源码构建和开发部署不是普通安装前提；需要这些方式时见[开发指南](<development.md>)。不要把打包命令当作安装或部署命令。
 
 ## 3. 初始化模板与 Manager
 
@@ -107,10 +101,10 @@ dsh web
 
 ## 更新与排障
 
-- **更新插件**：保留自己的配置，更新源码后重新运行 `pnpm run pack:release`，再通过插件管理命令安装新 tgz；重启 DSH 并刷新页面。不要假定源码改动会自动更新已加载插件。
-- **命令不存在 / 界面未出现**：确认安装的是 `web` profile，前端构建成功，插件已加载，并已重启与刷新。
-- **init 提示缺资源**：重新运行打包入口并安装新 tgz，不要只复制后端或使用此前不含资源的旧包。
+- **更新插件**：先确认目标新版本已在 npm 发布，保留自己的配置，让活动任务结束并停止对应 DSH 实例，再用 `dsh plugin --profile web add 包名@准确版本` 安装该版本，随后重启 DSH 并刷新页面。当前已存在的准确版本示例是 `dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1`（已有同版本时是重装，不是升级）；将来升级应使用届时确已发布的新版本，不照抄不存在的版本号。
+- **命令不存在 / 界面未出现**：确认安装的是 `web` profile，安装与启动使用相同 `DSH_HOME`，插件已加载且没有开发版双实例，并已重启与刷新。
+- **init 提示缺资源**：核对已加载的插件版本与安装错误，重新安装已发布的完整 npm 包并重启；不要只复制后端，也不要用旧开发版替代发布包。
 - **模板无效 / 路由不可用**：看 `list`、`check` 的诊断，按[配置参考](<example/README.md>)修正；不要直接启动未知路由。
-- **需要指定初始化目录**：在源码仓库使用 `node scripts/dsh-workflow-init.mjs --home <目录> --dry-run`；去掉 `--dry-run` 才写入。它与对话命令共享语义，但不是全局可执行命令，也不安装插件包。
+- **需要源码开发或离线本地包**：见[开发指南](<development.md>)，不属于首次 npm 安装步骤。
 
-更多操作见[使用手册](<user-guide.md>)；开发验证与发布前限制见[开发指南](<development.md>)。
+更多操作见[使用手册](<user-guide.md>)；源码验证与打包见[开发指南](<development.md>)；npm 发布维护见[发布指南](<releasing.md>)。
