@@ -2,7 +2,7 @@
 
 [Back to README](<../README.en.md>) · [中文](<getting-started.md>)
 
-Install the publicly released **`dsh-agent-team-workflow@0.2.1-rc.1`** from npm. A fresh installation from the official registry has passed verification. Normal installation requires no source checkout, build, local tgz or npm login. For source development and local packaging, see the [development guide](<development.md>); maintainers should use the [release guide](<releasing.md>) (Chinese).
+The current installation target is **`dsh-agent-team-workflow@0.2.1-rc.2`**. First run `npm view dsh-agent-team-workflow@0.2.1-rc.2 version --registry=https://registry.npmjs.org/` to confirm visibility; stop and investigate if it is unavailable or the query fails. This guide does not predeclare rc.2 registry installation verification as passed. Normal installation requires no source checkout, build, local tgz or npm login. For source development and local packaging, see the [development guide](<development.md>); maintainers should use the [release guide](<releasing.md>) (Chinese).
 
 ## 1. Prerequisites
 
@@ -17,7 +17,7 @@ dsh --version
 pnpm --version
 ```
 
-The declared minimum versions remain as stated above. This fresh-install verification used **Windows + Node.js 24.16.0 + DSH 0.2.1-rc.5**; it does not establish coverage of every operating system, Node and DSH version combination.
+The declared minimum versions remain as stated above. The previous `0.2.1-rc.1` fresh-install verification used **Windows + Node.js 24.16.0 + DSH 0.2.1-rc.5**; it does not verify rc.2 or establish coverage of every operating system, Node and DSH version combination.
 
 For an upgrade or a switch from a development build, let active tasks finish before stopping the relevant DSH instance. If the Web profile already registers a development bundle (such as `wfdev`) or local source installation, inspect and disable that old development registration before switching to npm. **Do not load two plugin instances.** Preserve custom presets, workflow configuration and state data; do not delete user resources to switch installations. The command below changes the selected Web profile.
 
@@ -26,7 +26,7 @@ For an upgrade or a switch from a development build, let active tasks finish bef
 Run this from any directory; no source checkout is needed:
 
 ```sh
-dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
+dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2
 ```
 
 Stop if the command fails and investigate the error instead of assuming installation succeeded. If you need to select the official npm registry explicitly, use an environment variable for this command only; do not change global npm/pnpm configuration:
@@ -34,13 +34,13 @@ Stop if the command fails and investigate the error instead of assuming installa
 **PowerShell (temporary child-process environment; leaves your current environment unchanged)**
 
 ```powershell
-pwsh -NoProfile -Command '$env:npm_config_registry = "https://registry.npmjs.org"; dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1'
+pwsh -NoProfile -Command '$env:npm_config_registry = "https://registry.npmjs.org"; dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2'
 ```
 
 **macOS / Linux shell (applies only to this command)**
 
 ```sh
-npm_config_registry=https://registry.npmjs.org dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
+npm_config_registry=https://registry.npmjs.org dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2
 ```
 
 These are alternatives for the same installation; choose one. A custom `DSH_HOME` must already be set in your current environment, which the child process inherits. Start or restart DSH Web, then refresh the browser:
@@ -101,7 +101,7 @@ Only one active Run is allowed per project workspace. BLOCK means that intervent
 
 ## Updates and troubleshooting
 
-- **Update the plugin:** first confirm that the target new version has been published to npm. Preserve your configuration, let active tasks finish and stop the relevant DSH instance, then install with `dsh plugin --profile web add package-name@exact-version`. Restart DSH and refresh the browser. An existing exact-version example is `dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1` (reinstalling this same version is not an upgrade). For a future upgrade, use a new version that has actually been published, not a made-up version number.
+- **Update the plugin:** first confirm that the target new version has been published to npm. Preserve your configuration, let active tasks finish and stop the relevant DSH instance, then install with `dsh plugin --profile web add package-name@exact-version`. Restart DSH and refresh the browser. The current target command is `dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2` (confirm publication first; reinstalling this same version is not an upgrade). For a future upgrade, use a new version that has actually been published, not a made-up version number.
 - **Missing commands or UI:** check that you installed into `web`, used the same `DSH_HOME` for installation and startup, loaded the plugin without a duplicate development instance, and restarted/refreshed.
 - **Init reports missing resources:** check the loaded plugin version and installation errors, reinstall the complete published npm package and restart. Do not copy only server artifacts or substitute an old development build.
 - **Invalid template or unavailable route:** read the `list` and `check` diagnostics and follow the [configuration reference](<example/README.md>) (Chinese) before starting.

@@ -46,10 +46,10 @@ The other four templates remain advanced examples and are not installed by `init
 
 **Installation requires Node.js ≥ 22.19 and DSH ≥ 0.2.1-rc.2; Node.js 24 is recommended.** Configure a working model provider before running workflows. Source builds additionally require Git and pnpm.
 
-Install the published version from npm; no source checkout, local build or npm login is required (`dsh` and `pnpm` must be available):
+Confirm that the target version is visible on npm before installing; no source checkout, local build or npm login is required (`dsh` and `pnpm` must be available):
 
 ```sh
-dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
+dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2
 dsh web
 ```
 

@@ -50,7 +50,7 @@ Runtime dependencies are `yaml` and `zod`. Host API packages remain development 
 pnpm run pack:release
 ```
 
-This single entry runs the server build, client build, existing [bundle generator](<../scripts/deploy-web.mjs>) with `--out .scratch/release`, then `npm pack ./.scratch/release --pack-destination .scratch`. The current candidate is `.scratch/dsh-agent-team-workflow-0.2.1-rc.1.tgz`; both staging and archives are Git-ignored. Output is outside staging, and a strict package `files` allowlist excludes old archives, scripts, source and unrelated staging files. No dependencies are added; nothing is published or deployed and no DSH configuration is changed.
+This single entry runs the server build, client build, existing [bundle generator](<../scripts/deploy-web.mjs>) with `--out .scratch/release`, then `npm pack ./.scratch/release --pack-destination .scratch`. The current candidate is `.scratch/dsh-agent-team-workflow-0.2.1-rc.2.tgz`; both staging and archives are Git-ignored. Output is outside staging, and a strict package `files` allowlist excludes old archives, scripts, source and unrelated staging files. No dependencies are added; nothing is published or deployed and no DSH configuration is changed.
 
 The root [development manifest](<../package.json>) owns version, description, engines, repository, homepage, bugs, author, keywords and runtime dependencies. The generator selects these fields without copying development dependencies or scripts into the bundle manifest. It copies README / LICENSE plus the existing server, client, patch and init resources. The single installed template comes from `WORKFLOW_IDS`; the four advanced examples stay in the source repository.
 

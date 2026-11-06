@@ -46,10 +46,10 @@
 
 **安装要求：Node.js ≥ 22.19、DSH ≥ 0.2.1-rc.2，推荐 Node.js 24。** 运行工作流前需配置可用模型；源码构建另需 Git 和 pnpm。
 
-从 npm 安装已发布版本，无需克隆源码、自己构建或登录 npm（需有可用的 `dsh`、`pnpm` 命令）：
+先确认目标版本已在 npm 可见，再安装；无需克隆源码、自己构建或登录 npm（需有可用的 `dsh`、`pnpm` 命令）：
 
 ```sh
-dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
+dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2
 dsh web
 ```
 

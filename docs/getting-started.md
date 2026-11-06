@@ -2,7 +2,7 @@
 
 [返回首页](<../README.md>) · [English](<getting-started.en.md>)
 
-推荐从 npm 安装已公开发布的 **`dsh-agent-team-workflow@0.2.1-rc.1`**；该版本已通过官方 registry 全新安装复验。普通安装无需克隆源码、构建或准备本地 tgz，也无需 npm 登录。源码开发与本地打包见[开发指南](<development.md>)，维护者发布流程见[发布指南](<releasing.md>)。
+当前安装目标为 **`dsh-agent-team-workflow@0.2.1-rc.2`**；安装前先用 `npm view dsh-agent-team-workflow@0.2.1-rc.2 version --registry=https://registry.npmjs.org/` 确认目标版本可见，查不到或报错时先停止排查。本指南不预先声明 rc.2 已通过 registry 安装复验。普通安装无需克隆源码、构建或准备本地 tgz，也无需 npm 登录。源码开发与本地打包见[开发指南](<development.md>)，维护者发布流程见[发布指南](<releasing.md>)。
 
 ## 1. 准备环境
 
@@ -17,7 +17,7 @@ dsh --version
 pnpm --version
 ```
 
-兼容下限声明保持为上述版本；本次全新安装实测环境为 **Windows + Node.js 24.16.0 + DSH 0.2.1-rc.5**，不代表已验证全部操作系统、Node 与 DSH 版本组合。
+兼容下限声明保持为上述版本；此前 `0.2.1-rc.1` 全新安装实测环境为 **Windows + Node.js 24.16.0 + DSH 0.2.1-rc.5**，不代表 rc.2 已复验，也不代表已验证全部操作系统、Node 与 DSH 版本组合。
 
 升级或从开发版切换时，先让活动任务结束，再停止对应 DSH 实例。若 Web profile 已注册开发 bundle（如 `wfdev`）或本地源码版，先核对并停用旧开发版注册，再切换到 npm 包，**不要同时加载两份插件实例**。保留自定义 preset、工作流配置和状态数据，不要为切换而删除用户资源。下面的安装命令会修改所选 Web profile。
 
@@ -26,7 +26,7 @@ pnpm --version
 在任意目录执行，不需要进入源码仓库：
 
 ```sh
-dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
+dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2
 ```
 
 命令失败就停止，先排查错误；不要继续假定安装成功。需要明确使用官方 npm registry 时，仅为本次命令设置环境变量，不修改用户全局 npm/pnpm 配置：
@@ -34,13 +34,13 @@ dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
 **PowerShell（在子进程中临时设置，退出后不影响当前环境）**
 
 ```powershell
-pwsh -NoProfile -Command '$env:npm_config_registry = "https://registry.npmjs.org"; dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1'
+pwsh -NoProfile -Command '$env:npm_config_registry = "https://registry.npmjs.org"; dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2'
 ```
 
 **macOS / Linux shell（仅作用于这条命令）**
 
 ```sh
-npm_config_registry=https://registry.npmjs.org dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
+npm_config_registry=https://registry.npmjs.org dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2
 ```
 
 以上是同一安装操作的替代写法，选择一种即可。自定义 `DSH_HOME` 必须已在当前环境中设置，子进程会继承它。安装完成后启动或重启 DSH Web，并刷新浏览器：
@@ -101,7 +101,7 @@ dsh web
 
 ## 更新与排障
 
-- **更新插件**：先确认目标新版本已在 npm 发布，保留自己的配置，让活动任务结束并停止对应 DSH 实例，再用 `dsh plugin --profile web add 包名@准确版本` 安装该版本，随后重启 DSH 并刷新页面。当前已存在的准确版本示例是 `dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1`（已有同版本时是重装，不是升级）；将来升级应使用届时确已发布的新版本，不照抄不存在的版本号。
+- **更新插件**：先确认目标新版本已在 npm 发布，保留自己的配置，让活动任务结束并停止对应 DSH 实例，再用 `dsh plugin --profile web add 包名@准确版本` 安装该版本，随后重启 DSH 并刷新页面。当前目标准确版本命令是 `dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2`（先确认已发布；已有同版本时是重装，不是升级）；将来升级应使用届时确已发布的新版本，不照抄不存在的版本号。
 - **命令不存在 / 界面未出现**：确认安装的是 `web` profile，安装与启动使用相同 `DSH_HOME`，插件已加载且没有开发版双实例，并已重启与刷新。
 - **init 提示缺资源**：核对已加载的插件版本与安装错误，重新安装已发布的完整 npm 包并重启；不要只复制后端，也不要用旧开发版替代发布包。
 - **模板无效 / 路由不可用**：看 `list`、`check` 的诊断，按[配置参考](<example/README.md>)修正；不要直接启动未知路由。

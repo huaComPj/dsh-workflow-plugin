@@ -20,10 +20,10 @@
 
 ## 2. 安装 / 部署 / 升级
 
-普通安装与升级使用 npm 已发布的准确版本，无需克隆源码、构建或登录 npm：
+普通安装与升级使用 npm 已发布的准确版本；当前目标为 `0.2.1-rc.2`，先确认该版本在 registry 可见。无需克隆源码、构建或登录 npm：
 
 ```sh
-dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.1
+dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2
 ```
 
 已有实例时先结束活动任务并停止对应实例，再安装、重启并刷新。首次安装后在 DSH 对话依次执行 `/dsh-flow init --dry-run`、`/dsh-flow init`，再重启以加载新增 preset；完整步骤见[安装与上手](<getting-started.md>)。自定义 `DSH_HOME` 全程保持一致，切换开发版时避免重复加载两份插件并保留用户配置。维护者升版、打包和重新发布见[更新与发布](<releasing.md>)。
@@ -45,7 +45,7 @@ bundle `package.json` 的必要字段（version / dependencies / dsh / main / ty
 生成步骤直接失败。`--out` 必须带目录值：漏写（`--out` 为末位）只打印用法并以 2 退出，**不会**回落到
 `~/.dsh` 的真实部署目标。注意：每次 build 后都要重跑 deploy；bundle 成员变更后必须重启 DSH。
 
-**版本兼容声明**：本插件需要 Node.js `>= 22.19.0`、DSH 宿主 `>= 0.2.1-rc.2`，与包元数据及首页一致。首发本地候选在 DSH `0.2.1-rc.2` 验证；2026-11-06 公开 registry 全新安装复验使用 Windows + Node.js `24.16.0` + DSH `0.2.1-rc.5`。这不是全部平台和版本组合的通过承诺。
+**版本兼容声明**：本插件需要 Node.js `>= 22.19.0`、DSH 宿主 `>= 0.2.1-rc.2`，与包元数据及首页一致。首发本地候选在 DSH `0.2.1-rc.2` 验证；插件 `0.2.1-rc.1` 的 2026-11-06 公开 registry 全新安装复验使用 Windows + Node.js `24.16.0` + DSH `0.2.1-rc.5`。这些历史结果不表示插件 rc.2 已复验，也不是全部平台和版本组合的通过承诺。
 
 **版本兼容提示**：dsh ≥ 0.1.1-rc.7 起 `compaction` 服务不再挂载在宿主平面，
 插件已改为运行期按 agent 解析（`host.ts` 的 `compactionFor`），不要在模块级
