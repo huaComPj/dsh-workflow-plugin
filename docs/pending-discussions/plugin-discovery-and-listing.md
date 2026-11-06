@@ -1,9 +1,21 @@
 # 插件发现与收录查证：官方索引协议、社区精选与本项目下一步
 
-> 调查日期：2026-11-06（北京时间）。仅调查、撰写本文；未 push、未修改 GitHub description/topics、未创建 PR/Issue、未发布新 npm 版本或 GitHub Release、未安装插件或启动 Web/部署。
+> 原始调查记录：2026-11-06（北京时间）。调查快照形成时仅调查、撰写本文，尚未 push、修改 GitHub description/topics、创建 PR/Issue、发布新 npm 版本或 GitHub Release、安装插件或启动 Web/部署；后续已执行事项见下面的状态与回执。
 > 对象：npm 包 `dsh-agent-team-workflow`；GitHub 仓库 `hua0424/dsh-workflow-plugin`。两者名字不同不构成收录障碍，关键在包的 `repository` 与实际仓库对应。
 
-> **迁移执行更新（2026-11-06）**：仓库现为 `huaComPj/dsh-workflow-plugin`；既有本地提交已推送，About、主页与 `dsh-plugin` 等 Topics 已设置。下文原始调查快照中的 `hua0424` 链接和当时状态保留为历史，不代表当前待办；投稿草稿及复验命令改用新身份。源码 manifest 与当前 README 链接会同步新地址，但已发布 npm rc.1 的 `repository` 不会自动改写，目录的 npm 自动关联仍需另外核对。
+> **执行状态（2026-11-06）**：仓库已迁为 `huaComPj/dsh-workflow-plugin`，既有提交、源码元数据和当前 README 链接已推送；About、主页与 Topics（含 `dsh-plugin`）已设置。迁仓修复版 npm `0.2.1-rc.2` 已发布并通过公开 registry 安装复验，`latest` / `next` 均指向该版本。社区收录 [PR #12625](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/12625) 已提交；不把提交 PR 当作已收录。下文旧 owner 与原始调查时点的状态保留为历史，不代表当前待办。
+
+## 本次执行回执
+
+- **源码基线**：[bdc430c](https://github.com/huaComPj/dsh-workflow-plugin/commit/bdc430c32892f5c7e34fd7fc39289d4ab8eae9a6)；包名仍为 `dsh-agent-team-workflow`，作者、运行逻辑及依赖不变，主要更新 repository / bugs / homepage、版本与发行说明。
+- **发行结果**：npm [0.2.1-rc.2](https://www.npmjs.com/package/dsh-agent-team-workflow/v/0.2.1-rc.2)；公开 tgz 为 261162 字节、46 个文件，SHA256 `d2333e1e3dc6a167dc4d1d9c101a09624485f72df0d519b8fa7a6020c7125af7`，完整 sha512 integrity 与已验收候选一致。首次发布及随后 latest 更新分别需要用户完成 npm 认证，均已完成；没有覆盖 rc.1 或绕过 2FA。
+- **验证**：typecheck + 894/894 + T3/E2E 受控 smoke；独立 real-Host 回归入口 5/5；Standards / Spec 独立审查各 0 findings。最终 tgz 与公开 registry 分别使用全新的隔离 Web profile 安装，公开版 downloaded 3 / reused 0，46/46 安装文件哈希一致，12/12 安装检查通过。
+- **实际边界**：Windows、Node 24.16.0、安装宿主 DSH 0.2.1-rc.5；命令激活使用 production Host Context / CommandRuntime / AgentLoop，engine 的 Actor / Judge / compact 为受控接缝。未新增真实 LLM、HTTP/browser GUI、完整进程重启或跨平台/全版本矩阵验收，未改真实用户 profile。
+- **迁仓关联复验**：原版上游 `probe-npm.mjs` 在只含该仓库的隔离输入上运行，匹配 npm 包名、版本 rc.2、有效发布时间及 `engines.dsh >=0.2.1-rc.2`；这是对关联规则的实跑，不是社区生产索引已经更新。
+- **社区投稿**：[PR #12625](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/12625)，head `2c71af302fc937e47ecd4120f03f4d23377448b8`，仅新增 `data/plugins/huaComPj__dsh-workflow-plugin.yml` 的 6 行，不改生成 README。投稿前条目全量结构校验 9112 条 / 0 problems，上游四组测试 24/24 PASS。真实 Submission gate 需由上游 Actions 执行，本地未以缺令牌或选中 1 个目标冒称 gate 通过。
+- **后续门禁**：PR check、Submission gate、维护者审核/合并、目录/CDN 构建与最终市场 / Discover 可见性，分别核验；CI 通过也不等于官方认证或已收录。用户仍需添加第三方索引。
+
+当前临时候选与明细位于 `.scratch/npm-rc2-2cc371e659a742c3bf87e07fe85586a1/`（Git ignored）；公开 npm 版本、源码提交、PR 及本文结论是跨 Run 接续依据，不能只依赖该临时目录。
 
 ## 一、结论先行
 
