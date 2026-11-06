@@ -5,7 +5,7 @@
 ## 环境
 
 - 插件版本（`package.json` 的 `version`）：
-- DSH 宿主版本（要求 `>= 0.2.0-rc.2`，见 `engines.dsh`）：
+- DSH 宿主版本（要求 `>= 0.2.1-rc.2`，见 `engines.dsh`）：
 - workflowId（如适用）：
 
 ## 问题描述

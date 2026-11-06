@@ -27,6 +27,8 @@ catalog 目录后按需修改，不要从零手写。
 
 ## 默认模板：通用开发工作流
 
+首次操作可跟随[完整任务示例：完善贡献指南](<development-workflow-walkthrough.md>)，使用 init 已安装的模板，从授权、启动到人工确认合并，不另建工作流。
+
 [development-workflow.yaml](<development-workflow.yaml>) 面向单仓库、单 GitHub Issue / PR，无子流程：
 
 ```text

@@ -14,6 +14,12 @@ Both READMEs embed these three supplied interface screenshots with localized alt
 | [ScreenShot_start_workflow.png](<ScreenShot_start_workflow.png>) | 当前会话中的工作流选择与任务描述弹窗。Workflow selection and task prompt dialog. |
 | [ScreenShot_workflow_monitor.png](<ScreenShot_workflow_monitor.png>) | 配套侧栏中的运行图、Actor / Judge、BLOCK 信息与执行记录；图中并非成功交付状态。Companion-sidebar monitor showing a blocked Run and execution details. |
 
+## 社区截图声明 / Community screenshot manifest
+
+仓库根目录的 [screenshots.json](<../../screenshots.json>) 按“配置 → 启动 → 监控”引用同一组三张图片，未新增或修改原图。该声明供社区目录采集，推送到远端后仍需等待收录与后续构建；本地有文件不等于市场已经显示，也不会自动改变已发布 npm 的 README。
+
+The root [screenshots.json](<../../screenshots.json>) lists the same three images in configuration → launch → monitor order. Community collection requires the declaration to be pushed, the listing to be accepted and a subsequent catalog build; it does not update the published npm README or guarantee images in every market UI.
+
 ## 引用方式 / Embedding
 
 从根 README 使用相对路径，并提供说明画面内容的替代文本：

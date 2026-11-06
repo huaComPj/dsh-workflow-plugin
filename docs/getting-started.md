@@ -99,6 +99,8 @@ dsh web
 
 一个项目工作区最多一个活动 Run。BLOCK 表示等待处理，不等于任务完成；恢复、终止及外部副作用的边界见[使用手册](<user-guide.md>)。
 
+想照着完成一个具体任务，见[默认工作流完整示例](<example/development-workflow-walkthrough.md>)：包含可复制的文档任务 prompt、五节点预期结果、返工与候选合并确认。
+
 ## 更新与排障
 
 - **更新插件**：先确认目标新版本已在 npm 发布，保留自己的配置，让活动任务结束并停止对应 DSH 实例，再用 `dsh plugin --profile web add 包名@准确版本` 安装该版本，随后重启 DSH 并刷新页面。当前目标准确版本命令是 `dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2`（先确认已发布；已有同版本时是重装，不是升级）；将来升级应使用届时确已发布的新版本，不照抄不存在的版本号。

@@ -99,6 +99,8 @@ Restart DSH, then create a session using **团队工作流 Manager（通用）**
 
 Only one active Run is allowed per project workspace. BLOCK means that intervention is needed, not that the task is complete. See the [user guide](<user-guide.md>) (Chinese) for recovery, termination and external side-effect boundaries.
 
+For a concrete task, see the [complete default-workflow walkthrough](<example/development-workflow-walkthrough.md>) (Chinese), including a copyable documentation-task prompt, expected results at all five nodes, rework and candidate-bound merge confirmation.
+
 ## Updates and troubleshooting
 
 - **Update the plugin:** first confirm that the target new version has been published to npm. Preserve your configuration, let active tasks finish and stop the relevant DSH instance, then install with `dsh plugin --profile web add package-name@exact-version`. Restart DSH and refresh the browser. The current target command is `dsh plugin --profile web add dsh-agent-team-workflow@0.2.1-rc.2` (confirm publication first; reinstalling this same version is not an upgrade). For a future upgrade, use a new version that has actually been published, not a made-up version number.

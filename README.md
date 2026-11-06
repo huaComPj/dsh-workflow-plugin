@@ -69,6 +69,8 @@ dsh web
 
 `check` 只检查配置，不发送真实模型推理请求；实际运行会调用模型，并可能执行获准的本地或远端操作。完整安装、升级与排障步骤见[安装与上手](<https://github.com/huaComPj/dsh-workflow-plugin/blob/main/docs/getting-started.md>)。
 
+完整操作可跟随[默认工作流任务示例](<https://github.com/huaComPj/dsh-workflow-plugin/blob/main/docs/example/development-workflow-walkthrough.md>)：在可写演示仓库完善贡献指南，逐步确认授权、检查与合并候选。
+
 ## 默认示例工作流
 
 `init` 安装的 `development-workflow` 是一个**单仓库、单 Issue、单 PR** 的五节点流程：

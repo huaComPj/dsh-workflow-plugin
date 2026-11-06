@@ -69,6 +69,8 @@ Alternatively, click **启动工作流** (Start workflow) near the conversation 
 
 `check` validates configuration without sending a real model-inference request. Running the workflow uses models and may perform authorized local or remote operations. For complete installation, upgrade and troubleshooting instructions, see [Installation and first run](<https://github.com/huaComPj/dsh-workflow-plugin/blob/main/docs/getting-started.en.md>).
 
+For a complete task, follow the [default-workflow walkthrough](<https://github.com/huaComPj/dsh-workflow-plugin/blob/main/docs/example/development-workflow-walkthrough.md>) (Chinese): improve a contribution guide in a writable demo repository, with explicit authorization, checks and candidate-bound merge confirmation.
+
 ## Default example workflow
 
 The `development-workflow` installed by `init` is a five-node workflow for **one repository, one Issue and one PR**:
