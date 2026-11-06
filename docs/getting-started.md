@@ -2,7 +2,7 @@
 
 [返回首页](<../README.md>) · [English](<getting-started.en.md>)
 
-当前安装目标为 **`dsh-agent-team-workflow@0.2.1-rc.2`**；安装前先用 `npm view dsh-agent-team-workflow@0.2.1-rc.2 version --registry=https://registry.npmjs.org/` 确认目标版本可见，查不到或报错时先停止排查。本指南不预先声明 rc.2 已通过 registry 安装复验。普通安装无需克隆源码、构建或准备本地 tgz，也无需 npm 登录。源码开发与本地打包见[开发指南](<development.md>)，维护者发布流程见[发布指南](<releasing.md>)。
+推荐安装已公开发布的 **`dsh-agent-team-workflow@0.2.1-rc.2`**；该版本已通过公开 registry 全新隔离 Web profile 安装复验，结果与边界见[发行执行回执](<pending-discussions/plugin-discovery-and-listing.md#本次执行回执>)。需要确认 registry 可见性时，可执行 `npm view dsh-agent-team-workflow@0.2.1-rc.2 version --registry=https://registry.npmjs.org/`；查询失败就先排查，不假定安装成功。普通安装无需克隆源码、构建或准备本地 tgz，也无需 npm 登录。源码开发与本地打包见[开发指南](<development.md>)，维护者发布流程见[发布指南](<releasing.md>)。
 
 ## 1. 准备环境
 
@@ -17,7 +17,7 @@ dsh --version
 pnpm --version
 ```
 
-兼容下限声明保持为上述版本；此前 `0.2.1-rc.1` 全新安装实测环境为 **Windows + Node.js 24.16.0 + DSH 0.2.1-rc.5**，不代表 rc.2 已复验，也不代表已验证全部操作系统、Node 与 DSH 版本组合。
+兼容下限声明保持为上述版本；`0.2.1-rc.2` 公开 registry 安装实测环境为 **Windows + Node.js 24.16.0 + DSH 0.2.1-rc.5**，46/46 安装文件一致、12/12 安装检查通过。命令使用真实 Host 服务，流程中的 Actor / Judge / compact 为受控接缝；未新增真实 LLM、浏览器界面或全平台/版本矩阵验收。
 
 升级或从开发版切换时，先让活动任务结束，再停止对应 DSH 实例。若 Web profile 已注册开发 bundle（如 `wfdev`）或本地源码版，先核对并停用旧开发版注册，再切换到 npm 包，**不要同时加载两份插件实例**。保留自定义 preset、工作流配置和状态数据，不要为切换而删除用户资源。下面的安装命令会修改所选 Web profile。
 
@@ -89,7 +89,7 @@ dsh web
 
    `check` 是静态配置检查，不会发送真实推理请求；通过不等于 provider 一定可用。
 
-4. 明确任务范围、验收标准，以及是否允许提交、推送或合并。点击输入区「启动工作流」，或执行：
+4. 准备目标 GitHub 仓库、Git 和可用的 GitHub 访问工具（如已登录的 `gh` CLI），确认仓库权限。默认模板会创建 Issue、分支，提交、推送并创建 PR，需先明确任务范围、验收标准并授权这些操作；合并前还会针对具体候选另行确认。若只允许只读操作，应先调整模板，不要直接启动完整交付流程。然后点击输入区「启动工作流」，或执行：
 
    ```text
    /dsh-flow start development-workflow 修复指定问题，并完成审查和测试

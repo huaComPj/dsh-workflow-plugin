@@ -45,7 +45,7 @@ bundle `package.json` 的必要字段（version / dependencies / dsh / main / ty
 生成步骤直接失败。`--out` 必须带目录值：漏写（`--out` 为末位）只打印用法并以 2 退出，**不会**回落到
 `~/.dsh` 的真实部署目标。注意：每次 build 后都要重跑 deploy；bundle 成员变更后必须重启 DSH。
 
-**版本兼容声明**：本插件需要 Node.js `>= 22.19.0`、DSH 宿主 `>= 0.2.1-rc.2`，与包元数据及首页一致。首发本地候选在 DSH `0.2.1-rc.2` 验证；插件 `0.2.1-rc.1` 的 2026-11-06 公开 registry 全新安装复验使用 Windows + Node.js `24.16.0` + DSH `0.2.1-rc.5`。这些历史结果不表示插件 rc.2 已复验，也不是全部平台和版本组合的通过承诺。
+**版本兼容声明**：本插件需要 Node.js `>= 22.19.0`、DSH 宿主 `>= 0.2.1-rc.2`，与包元数据及首页一致。首发本地候选在 DSH `0.2.1-rc.2` 验证；插件 `0.2.1-rc.2` 已在 Windows + Node.js `24.16.0` + DSH `0.2.1-rc.5` 通过公开 registry 全新隔离安装复验（46/46 文件一致、12/12 安装检查）。命令激活使用真实 Host 服务，流程派发 / Judge / compact 为受控接缝；未新增真实 LLM、浏览器界面或跨平台/全版本矩阵验收。详见[发行执行回执](<pending-discussions/plugin-discovery-and-listing.md#本次执行回执>)。
 
 **版本兼容提示**：dsh ≥ 0.1.1-rc.7 起 `compaction` 服务不再挂载在宿主平面，
 插件已改为运行期按 agent 解析（`host.ts` 的 `compactionFor`），不要在模块级
@@ -54,8 +54,7 @@ inject 它，否则 `dsh web` 会永久 pending 卡死
 
 ## 3. 配置一个工作流
 
-1. 复制 v3 示例：`docs/example/coding-workflow-rapid.yaml`（单仓单任务）或
-   `docs/example/coding-workflow.yaml`（含子流程）→ `~/.dsh/workflows/<workflow-id>.yaml`。
+1. 首次使用先执行 `/dsh-flow init`，打开默认 `development-workflow`；自定义时可从该模板复制。需要更复杂的流程时，再参考[进阶配置示例](<example/README.md>)：`coding-workflow-rapid.yaml`（单仓单任务）或 `coding-workflow.yaml`（含子流程），按需复制到当前 DSH home 的 `workflows/<workflow-id>.yaml`。它们不是默认自动安装项。
    （`workflow-template.yaml` 是 v2 遗留模板，运行时已不接受，仅作历史参考。）
 2. 文件名去掉 `.yaml` 即 workflowId，必须匹配 `[a-z][a-z0-9-]*`（拒绝 `.yml`）。
 3. YAML 是受限单文档 1.2：禁止 duplicate key、anchor/alias/merge、custom tag、

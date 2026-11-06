@@ -2,7 +2,7 @@
 
 [Back to README](<../README.en.md>) · [中文](<getting-started.md>)
 
-The current installation target is **`dsh-agent-team-workflow@0.2.1-rc.2`**. First run `npm view dsh-agent-team-workflow@0.2.1-rc.2 version --registry=https://registry.npmjs.org/` to confirm visibility; stop and investigate if it is unavailable or the query fails. This guide does not predeclare rc.2 registry installation verification as passed. Normal installation requires no source checkout, build, local tgz or npm login. For source development and local packaging, see the [development guide](<development.md>); maintainers should use the [release guide](<releasing.md>) (Chinese).
+Install the publicly released **`dsh-agent-team-workflow@0.2.1-rc.2`**. A fresh, isolated Web-profile installation from the public registry has passed verification; see the [release execution receipt](<pending-discussions/plugin-discovery-and-listing.md#本次执行回执>) (Chinese) for results and boundaries. To check registry visibility, run `npm view dsh-agent-team-workflow@0.2.1-rc.2 version --registry=https://registry.npmjs.org/`; investigate a failed query rather than assuming installation will succeed. Normal installation requires no source checkout, build, local tgz or npm login. For source development and local packaging, see the [development guide](<development.md>); maintainers should use the [release guide](<releasing.md>) (Chinese).
 
 ## 1. Prerequisites
 
@@ -17,7 +17,7 @@ dsh --version
 pnpm --version
 ```
 
-The declared minimum versions remain as stated above. The previous `0.2.1-rc.1` fresh-install verification used **Windows + Node.js 24.16.0 + DSH 0.2.1-rc.5**; it does not verify rc.2 or establish coverage of every operating system, Node and DSH version combination.
+The declared minimum versions remain as stated above. The `0.2.1-rc.2` public-registry installation was tested on **Windows + Node.js 24.16.0 + DSH 0.2.1-rc.5**, with **46/46 installed files matching and 12/12 installation checks passing**. Commands use production Host services; engine Actor / Judge / compact behavior uses controlled seams. This adds no real-LLM, browser-UI or full platform/version-matrix acceptance.
 
 For an upgrade or a switch from a development build, let active tasks finish before stopping the relevant DSH instance. If the Web profile already registers a development bundle (such as `wfdev`) or local source installation, inspect and disable that old development registration before switching to npm. **Do not load two plugin instances.** Preserve custom presets, workflow configuration and state data; do not delete user resources to switch installations. The command below changes the selected Web profile.
 
@@ -89,7 +89,7 @@ Restart DSH, then create a session using **团队工作流 Manager（通用）**
 
    `check` validates static configuration without sending a real inference request. Passing it does not guarantee provider availability.
 
-4. Define the scope, acceptance criteria and permissions for commits, pushes or merges. Click **启动工作流** (Start workflow) near the conversation input, or run:
+4. Prepare the target GitHub repository, Git and a usable GitHub access tool, such as an authenticated `gh` CLI, with the necessary repository permissions. The default template creates an Issue and branch, commits, pushes and opens a PR: define the task scope and acceptance criteria and authorize these operations first. Merging requires a separate confirmation for the specific candidate. If only read-only work is permitted, adapt the template instead of starting the full delivery workflow. Then click **启动工作流** (Start workflow) near the conversation input, or run:
 
    ```text
    /dsh-flow start development-workflow Fix the specified issue, then review and test the changes

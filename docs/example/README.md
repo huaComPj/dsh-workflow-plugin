@@ -62,7 +62,7 @@ create-issue → implement → review → test → merge
    Copy-Item docs/example/development-workflow.yaml "$env:USERPROFILE\.dsh\workflows\<workflow-id>.yaml"
    ```
 
-   （`%DSH_HOME%\workflows\`，DSH_HOME 默认为 `~/.dsh`。）
+   上例只适用于默认 DSH home（`~/.dsh`）；请将 `<workflow-id>` 换为实际标识，并先确认目标目录存在。若设置了自定义 `DSH_HOME`，目标应改为该 home 的 `workflows` 目录（PowerShell 中为 `$env:DSH_HOME\workflows\<workflow-id>.yaml`），否则当前 DSH 实例不会在默认目录发现这份模板。
 
 2. **文件名去掉 `.yaml` 后即 workflowId**，必须匹配 `[a-z][a-z0-9-]*`
    （小写字母开头，只含小写字母/数字/连字符）；`.yml` 会被直接忽略。
