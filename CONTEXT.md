@@ -107,6 +107,16 @@ Role（含 judgeRole）的模型路由由 provider、modelId 与可选思考强�
 
 本地模型列表（Local Model Catalog）是当前 profile 实际声明的模型集合：适配器内置目录与 settings/config 显式声明合并而成，与供应商接口的动态发现无关。modelId 本地列表校验与档位支持矩阵按 #149 执行（含明确的 fail-open 跳过维度与 start 前置阻断，由 T2/T3 交付）；基线空列表按不可用处理，unlisted 阻断为有意严格策略。
 
+## 已确认的 Run 模型配置术语（设计中，尚未实施）
+
+**Run Model Configuration（Run 模型配置）**：仅属于某个 Run 的普通 Role 或 Judge 的主模型与可选备用模型组合，各路由具有独立思考强度；不属于 Manager 主会话，也不等于工作流模板配置。
+
+**Pending Model Configuration（待生效模型配置）**：已为后续使用保存、尚未用于对应角色新派发的 Run 模型配置；它不是当前在途派发实际使用的模型。
+
+_Avoid_: 用“当前模型”混称 Run 模型配置、待生效配置与已实派路由。
+
+本节是下一版已确认设计术语，不改写下方现行实现合同；派发生效边界、主备延续、原会话换模及人类写入范围见[监控与 Run 模型配置设计](docs/pending-discussions/run-monitor-layout-and-model-config.md)。模型切换不等于会话替换；保留原 Session 与上下文不代表绕过正常上下文压缩。
+
 ## 已确认的 Fallback 领域术语（#235–#237 已落地 Runtime）
 
 **Primary Model Route（主模型路由）**：Role Actor 或 Judge 在尚未发生故障切换时使用的模型路由。Manager 主会话不属于本次自动切换范围。
