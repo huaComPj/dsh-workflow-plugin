@@ -451,7 +451,7 @@ test('#261 维护态：继续按周期探测，状态库恢复后自愈（不重
   } finally { w.cleanup() }
 })
 
-test('#282 顶部两行摘要 + 运行详情默认收起：信息不减，纵向占用减少', async () => {
+test('#286 顶栏集中 Run/状态/耗时/刷新；运行详情与长材料默认折叠且完整可读', async () => {
   const w = createWorld()
   try {
     const runId = await w.completeRun('ws-a')
@@ -462,14 +462,13 @@ test('#282 顶部两行摘要 + 运行详情默认收起：信息不减，纵向
     assert.match(text, /返回：/, '业务返回值仍在摘要首行')
     assert.match(text, /自动刷新已停止/, '终态提示保留')
     assert.match(text, /总耗时/, '总耗时可读')
-    // 摘要固定两行：首行状态/业务返回/终态提示，次行工作流名 + 耗时。
-    const summary = ui.find((element: any) => element.props.className === 'wf-monitor-summary')
-    assert.ok(summary !== null, '存在两行摘要容器')
-    const rows = collect(summary, (element: any) => element.props.className?.startsWith?.('wf-monitor-summary-row'))
-    assert.equal(rows.length, 2, '摘要只占两行')
-    assert.match(textOf(rows[0]), /已完成/)
-    assert.match(textOf(rows[0]), /自动刷新已停止/, '终态提示与状态同排，不再独占一段')
-    assert.match(textOf(rows[1]), /总耗时/)
+    const toolbar = ui.find((element: any) => element.props.className === 'wf-monitor-toolbar')
+    assert.ok(toolbar !== null, '顶栏集中选择/状态/耗时/刷新')
+    assert.equal(collect(toolbar, (element: any) => element.type === 'select').length, 1)
+    assert.match(textOf(toolbar), /已完成/)
+    assert.match(textOf(toolbar), /自动刷新已停止/)
+    assert.match(textOf(toolbar), /总耗时/)
+    assert.equal(collect(toolbar, (element: any) => element.props.className === 'wf-monitor-refresh').length, 1)
     // 运行详情：原生 details 默认收起，完整 Run ID / 开始时间 / 角色配置（非实际派发）都在里面。
     const details = ui.find((element: any) => element.type === 'details')
     assert.ok(details !== null, '运行详情使用原生 details')
@@ -479,10 +478,13 @@ test('#282 顶部两行摘要 + 运行详情默认收起：信息不减，纵向
     assert.match(detailText, new RegExp(`Run：${runId}`))
     assert.match(detailText, /开始：/)
     assert.match(detailText, /运行角色配置（非实际派发）：/)
-    // 刷新入口仍在标题区工具栏里（终态才发现新 Run 的唯一入口），与 Run 选择同排。
-    const toolbar = ui.find((element: any) => element.props.className === 'wf-monitor-toolbar')
-    assert.ok(toolbar !== null, '工具栏存在')
-    assert.equal(collect(toolbar, (element: any) => element.props.className === 'wf-monitor-refresh').length, 1)
+    assert.match(detailText, /工作区：ws-a/, '完整工作区可展开阅读，而非仅依赖悬浮提示')
+    for (const label of ['启动 prompt', '完整节点列表']) {
+      const material = ui.find((element: any) => element.type === 'details'
+        && collect(element, (child: any) => child.type === 'summary' && textOf(child) === label).length === 1)
+      assert.ok(material !== null, `${label} 使用键盘可达的原生折叠控件`)
+      assert.notEqual(material.props.open, true, `${label} 默认收起`)
+    }
   } finally { w.cleanup() }
 })
 
@@ -1109,7 +1111,9 @@ test('#275 执行记录表：真实 engine→status RPC→bundle 渲染列/行�
     assert.match(text, /主流程/)
     assert.match(text, /mgr\/m-manager · 首选/, 'Actor 模型来自派发快照')
     const scroll = ui.find((el: any) => el.props?.className === 'wf-monitor-records-scroll')
-    assert.equal(collect(scroll?.props?.children, el => el.type === 'table')[0]?.props?.className, 'wf-record-table', '表格在可滚动容器内，表头/前两列用系统色固定在滚动容器外')
+    assert.equal(collect(scroll?.props?.children, el => el.type === 'table')[0]?.props?.className, 'wf-record-table')
+    assert.equal(scroll?.props?.tabIndex, 0, '记录窗口能用键盘获得焦点')
+    assert.equal(scroll?.props?.['aria-label'], '执行记录，可横向和纵向滚动')
     const header = ui.find((el: any) => el.type === 'th' && el.props?.className === 'wf-record-sticky-1')
     assert.equal(header?.props?.scope, 'col')
     const toggle = ui.find((el: any) => el.props?.className === 'wf-record-toggle')
@@ -1122,6 +1126,11 @@ test('#275 执行记录表：真实 engine→status RPC→bundle 渲染列/行�
     assert.match(text, /第 1 轮：提交「succeeded」 · 判定不通过/, '下钻显示每轮提交与判定')
     assert.match(text, /第 2 轮：提交「succeeded」/, '第二轮取自己的提交时间')
     assert.match(text, /Actor mgr\/m-manager · 首选/, '每轮模型来自该轮派发快照')
+    assert.match(text, /节点 ID：plan/, '固定身份列截断时可通过键盘展开读取完整名称和 ID')
+    await w.tick(2000)
+    assert.equal(ui.find((el: any) => el.props?.className === 'wf-record-toggle')?.props?.['aria-expanded'], 'true', '轮询保留所选记录的展开状态')
+    assert.match(ui.text(), /第 2 轮：提交「succeeded」/)
+    assert.match(textOf(ui.find((el: any) => el.props?.className === 'wf-monitor-current')), /当前节点：review/, '历史详情展开不替代真实当前执行')
 
     // review 通过 → Run 终态：末次记录保留，当前卡不再冒充当前执行。
     const reviewDispatch = (await w.store.get('ws-a'))!.execution.dispatch!

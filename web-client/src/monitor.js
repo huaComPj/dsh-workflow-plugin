@@ -20,15 +20,21 @@ export const MONITOR_STYLES = `
 /* #282 主题契约：正文/次要文字/边框取宿主 --dsw-alias-* 语义色（浅色由 body、深色由 body[data-ds-dark-theme] 定义），
    兜底写 currentColor；状态色由宿主状态语义色与正文色混合，浅深两套都保持 >=4.5:1，不再依赖宿主未定义的
    --dsh-text/#ddd 浅灰兜底，也不只按操作系统偏好换色。 */
-.wf-monitor { font-size: 13px; color: ${MONITOR_TEXT}; padding: 8px; display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow-y: auto; gap: 8px; }
+.wf-monitor { font-size: 13px; color: ${MONITOR_TEXT}; padding: 8px; display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; gap: 8px; container-type: inline-size; }
+/* 外层承接全部内容；低高度时不让 flex 压扁图、记录或展开材料。 */
+.wf-monitor > * { flex-shrink: 0; min-width: 0; }
+.wf-monitor-overview { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; align-items: start; }
+.wf-monitor-overview > * { min-width: 0; }
+.wf-monitor-current, .wf-monitor-node, .wf-monitor-prompt, .wf-record-rounds, .wf-monitor-toolbar { overflow-wrap: anywhere; }
+.wf-monitor button:focus-visible, .wf-monitor select:focus-visible, .wf-monitor-records-scroll:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, currentColor); outline-offset: 2px; }
+@container (max-width: 760px) { .wf-monitor-overview { grid-template-columns: minmax(0, 1fr); } }
 .wf-monitor-banner { background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 16%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 55%, transparent); color: ${MONITOR_TEXT}; padding: 6px 8px; border-radius: 6px; }
 .wf-monitor-status { font-weight: 600; }
 .wf-monitor-status.run-blocked { color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ec1313) 60%, ${MONITOR_TEXT}); }
 .wf-monitor-status.run-ok { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 45%, ${MONITOR_TEXT}); }
 .wf-monitor-muted { color: ${MONITOR_MUTED}; }
-/* #282 顶部两行摘要：状态+业务返回 / 工作流+耗时；「自动刷新已停止」只占状态旁的简短提示。 */
-.wf-monitor-summary { display: flex; flex-direction: column; gap: 2px; }
-.wf-monitor-summary-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+/* #286 摘要并入顶栏，随侧栏宽度自然换行。 */
+.wf-monitor-summary { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; min-width: 0; flex: 1 1 200px; }
 .wf-monitor-return-value { color: ${MONITOR_MUTED}; }
 .wf-monitor-terminal-note { margin-left: auto; color: ${MONITOR_MUTED}; font-size: 12px; }
 /* #282 运行详情默认收起：原生 details/summary 保留键盘与 aria-expanded 语义。 */
@@ -38,7 +44,7 @@ export const MONITOR_STYLES = `
 .wf-monitor-details-body { display: flex; flex-direction: column; gap: 2px; padding-top: 2px; color: ${MONITOR_MUTED}; font-size: 12px; overflow-wrap: anywhere; }
 .wf-monitor-prompt { white-space: pre-wrap; background: rgba(128,128,128,0.12); border-radius: 6px; padding: 6px 8px; }
 .wf-monitor-nodes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.wf-monitor-node { display: flex; gap: 6px; align-items: baseline; padding: 3px 6px; border-radius: 4px; }
+.wf-monitor-node { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; padding: 3px 6px; border-radius: 4px; }
 .wf-monitor-node.wf-node-current { background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 18%, transparent); }
 .wf-node-phase.phase-working { color: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #f59e0b) 45%, ${MONITOR_TEXT}); }
 .wf-node-phase.phase-checking { color: ${MONITOR_ACCENT_TEXT}; }
@@ -74,14 +80,14 @@ export const MONITOR_STYLES = `
 .wf-monitor-sep { opacity: 0.6; }
 .wf-monitor-return { align-self: flex-start; padding: 3px 8px; font-size: 12px; border-color: var(--dsw-alias-state-business-primary, currentColor); color: ${MONITOR_ACCENT_TEXT}; }
 /* #254 多 Run 切换器 / 空态 / 终态提示。 */
-.wf-monitor-switcher { display: flex; align-items: center; gap: 6px; font-size: 12px; }
-.wf-monitor-switcher select { max-width: 100%; padding: 2px 4px; font-size: 12px; }
+.wf-monitor-switcher { display: flex; align-items: center; gap: 6px; font-size: 12px; min-width: 0; max-width: 100%; }
+.wf-monitor-switcher select { min-width: 0; max-width: 100%; padding: 2px 4px; font-size: 12px; }
 .wf-monitor-guidance { background: rgba(128,128,128,0.12); border-radius: 6px; padding: 8px; white-space: pre-wrap; }
 .wf-monitor-maintenance { white-space: pre-wrap; }
 /* #261 只读刷新入口：终态停周期后由用户决定何时重新读取；#282 与 Run 选择同排，少占一行。 */
-.wf-monitor-toolbar { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
+.wf-monitor-toolbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .wf-monitor-refresh { padding: 2px 8px; font-size: 12px; }
-/* #274 当前执行卡：图下独立区块，一眼看清谁在干活、用什么模型、来源阶段。 */
+/* #274 独立当前执行卡：一眼看清谁在干活、用什么模型、来源阶段。 */
 .wf-monitor-current { display: flex; flex-direction: column; gap: 4px; background: color-mix(in srgb, ${MONITOR_TEXT} 6%, transparent); border-left: 3px solid var(--dsw-alias-state-business-primary, #4176e6); border-radius: 6px; padding: 8px; }
 .wf-monitor-current.is-terminal { border-left-color: ${MONITOR_MUTED}; }
 .wf-monitor-card-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
@@ -90,20 +96,25 @@ export const MONITOR_STYLES = `
 .wf-monitor-card-role { min-width: 96px; color: ${MONITOR_MUTED}; }
 .wf-monitor-card-state { font-weight: 600; }
 .wf-monitor-card-terminal { color: ${MONITOR_TEXT}; font-weight: 600; }
-/* #275 执行记录表：固定列序，表头吸顶、节点/流程两列吸附左侧，横向滚动不丢失行身份。
-   #282 去掉独立纵向限高：整栏只有一条主滚动条，记录不再被困在 360px 内层滚动区里。 */
-.wf-monitor-records { display: flex; flex-direction: column; gap: 4px; }
+/* #286 原生双向滚动：短表自然高，长表占视口约 60%，横条留在可视窗口底部。 */
+.wf-monitor-records { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .wf-monitor-records-title { font-weight: 600; font-size: 13px; }
-.wf-monitor-records-scroll { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.3)); border-radius: 6px; background: var(--dsw-alias-bg-layer-2, Canvas); }
+.wf-monitor-records-scroll { max-height: 60vh; max-height: 60dvh; overflow: auto; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.3)); border-radius: 6px; background: var(--dsw-alias-bg-layer-2, Canvas); }
 .wf-record-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12px; }
-.wf-record-table th, .wf-record-table td { padding: 4px 6px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); }
+.wf-record-table th, .wf-record-table td { box-sizing: border-box; padding: 4px 6px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2)); }
 .wf-record-table thead th { position: sticky; top: 0; z-index: 3; background: var(--dsw-alias-bg-layer-2, Canvas); border-bottom: 1px solid var(--dsw-alias-border-l3, rgba(128,128,128,0.45)); }
 .wf-record-table .wf-record-sticky-1 { position: sticky; left: 0; z-index: 2; background: var(--dsw-alias-bg-layer-2, Canvas); width: 168px; min-width: 168px; max-width: 168px; overflow: hidden; text-overflow: ellipsis; }
 .wf-record-table .wf-record-sticky-2 { position: sticky; left: 168px; z-index: 2; background: var(--dsw-alias-bg-layer-2, Canvas); min-width: 96px; box-shadow: 1px 0 0 var(--dsw-alias-border-l3, rgba(128,128,128,0.35)); }
+/* 窄侧栏只固定节点身份，给后方字段留出空间；完整名称可用行展开阅读。 */
+@container (max-width: 600px) {
+  .wf-record-table .wf-record-sticky-1 { width: 124px; min-width: 124px; max-width: 124px; }
+  .wf-record-table tbody .wf-record-sticky-2 { position: static; }
+  .wf-record-table thead .wf-record-sticky-2 { left: auto; }
+}
 .wf-record-table thead .wf-record-sticky-1, .wf-record-table thead .wf-record-sticky-2 { z-index: 4; }
 .wf-record-table tbody .wf-record-sticky-1, .wf-record-table tbody .wf-record-sticky-2 { background: var(--dsw-alias-bg-layer-2, Canvas); }
-.wf-record-row.is-blocked td { background: rgba(200,80,80,0.12); }
-.wf-record-row.is-current td { background: rgba(120,160,255,0.14); }
+.wf-record-row.is-blocked td { background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #c85050) 12%, var(--dsw-alias-bg-layer-2, Canvas)); }
+.wf-record-row.is-current td { background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #78a0ff) 14%, var(--dsw-alias-bg-layer-2, Canvas)); }
 .wf-record-toggle { padding: 0 4px; font-size: 11px; border: 1px solid rgba(128,128,128,0.5); background: transparent; color: inherit; margin-right: 4px; }
 .wf-record-node { font-weight: 600; }
 .wf-record-detail td { background: rgba(128,128,128,0.08); white-space: normal; }
@@ -235,7 +246,7 @@ function currentCardEl(card) {
 
 /** #275 执行记录表下钻：同一次进入内的多轮提交/判定、未形成提交的重派与换模时间线。 */
 function recordDetailEl(record) {
-  const items = []
+  const items = [h('li', { key: 'identity' }, `${record.nodeLabel} · 节点 ID：${record.nodeId} · ${record.workflowLabel}`)]
   if (record.blockReason !== null && record.blockReason !== '') items.push(h('li', { key: 'block', className: 'wf-node-block' }, `BLOCK：${record.blockReason}`))
   for (const round of record.drilldown.rounds) {
     const times = [`提交 ${round.submittedAtText ?? '时间未记录'}`, round.judgedAtText === null ? null : `判定 ${round.judgedAtText}`].filter(Boolean).join(' · ')
@@ -283,7 +294,7 @@ function recordsEl(records, openKey, onToggle) {
   }
   return h('section', { className: 'wf-monitor-records', 'aria-label': '执行记录' },
     h('div', { className: 'wf-monitor-records-title' }, `执行记录（${records.length} 次进入）`),
-    h('div', { className: 'wf-monitor-records-scroll' },
+    h('div', { className: 'wf-monitor-records-scroll', role: 'region', 'aria-label': '执行记录，可横向和纵向滚动', tabIndex: 0 },
       h('table', { className: 'wf-record-table' },
         h('thead', null,
           h('tr', null, ...RECORD_COLUMNS.map((name, index) => h('th', {
@@ -311,7 +322,6 @@ export function WorkflowMonitorTab({ fetchStatus, visible = true, scope }) {
   // 选择与目录绑在一起：cwd 变化即回到「当前目录（默认）」，不等 effect 事后纠正（#261）。
   const [selection, setSelection] = useState({ cwd, runId: null })
   const selectedRunId = selection.cwd === cwd ? selection.runId : null
-  const [promptOpen, setPromptOpen] = useState(false)
   const [follow, setFollow] = useState(initialFollowState)
   // #275 执行记录表下钻：一次只展开一行；Run 变化时收起（行 key 含 runId 之外的身份，显式重置更稳）。
   const [openRecord, setOpenRecord] = useState(null)
@@ -358,8 +368,16 @@ export function WorkflowMonitorTab({ fetchStatus, visible = true, scope }) {
     },
     h('option', { value: '' }, '当前目录（默认）'),
     ...view.runs.map(ref => h('option', { key: ref.runId, value: ref.runId }, `${ref.label} · ${ref.statusLabel}`))))
-  // #282 切换器与刷新同排：标题区以下只留两行摘要，省掉一整行的垂直阅读成本。
-  const toolbarEl = h('div', { className: 'wf-monitor-toolbar' }, switcher, refreshEl)
+  const hasRun = view.mode === 'run' || view.mode === 'terminal'
+  const toolbarEl = h('div', { className: 'wf-monitor-toolbar' }, switcher,
+    hasRun ? h('div', { className: 'wf-monitor-summary' },
+      h('span', { className: `wf-monitor-status ${view.run.statusClass}` }, view.run.statusLabel),
+      h('span', { className: 'wf-monitor-muted' }, view.run.workflowId),
+      h('span', null, `${view.run.durationLabel} ${view.run.durationText ?? '—'}`),
+      view.run.businessReturn ? h('span', { className: 'wf-monitor-return-value' }, `返回：${view.run.businessReturn}`) : null,
+      view.terminalNote ? h('span', { className: 'wf-monitor-terminal-note' }, view.terminalNote) : null,
+    ) : null,
+    refreshEl)
   const frame = (...children) => h('div', { className: 'wf-monitor' }, styleEl, bannerEl, toolbarEl, ...children)
   if (view.mode === 'loading') {
     return frame(h('div', { className: 'wf-monitor-muted' }, '正在加载运行状态…'))
@@ -380,30 +398,19 @@ export function WorkflowMonitorTab({ fetchStatus, visible = true, scope }) {
     ? null
     : graph.flows.find(item => item.id === followView.activeFlowId) ?? graph.flows.find(item => item.id === currentFlowId) ?? graph.flows[0] ?? null
   return frame(
-    // #282 顶部两行摘要：状态+业务返回值 / 工作流名称+总耗时；终态只留状态旁的简短提示。
-    h('div', { className: 'wf-monitor-summary' },
-      h('div', { className: 'wf-monitor-summary-row' },
-        h('span', { className: `wf-monitor-status ${run.statusClass}` }, run.statusLabel),
-        run.blockReason ? h('span', { className: 'wf-node-block' }, ` — ${run.blockReason}`) : null,
-        run.businessReturn ? h('span', { className: 'wf-monitor-return-value' }, ` · 返回：${run.businessReturn}`) : null,
-        // 终态提示在视图模型顶层（view.terminalNote），历史上误读 run.terminalNote 导致从不渲染（#261 修正）。
-        view.terminalNote ? h('span', { className: 'wf-monitor-terminal-note' }, view.terminalNote) : null,
-      ),
-      h('div', { className: 'wf-monitor-summary-row wf-monitor-muted' },
-        h('span', null, run.workflowId),
-        h('span', { 'aria-hidden': 'true' }, '·'),
-        h('span', null, `${run.durationLabel} ${run.durationText ?? '—'}`),
-      ),
-    ),
+    // BLOCK 不收进折叠材料中；长原因完整换行显示。
+    run.blockReason ? h('div', { className: 'wf-node-block' }, `BLOCK：${run.blockReason}`) : null,
     // #282 「运行详情」默认收起（原生 details，保留键盘与 aria-expanded）；角色配置可能含 override，非实际派发。
     h('details', { className: 'wf-monitor-details' },
       h('summary', null, '运行详情'),
       h('div', { className: 'wf-monitor-details-body' },
         h('div', null, `Run：${run.runId}`),
+        h('div', null, `工作区：${run.workspaceKey}`),
         h('div', null, `开始：${run.startedAtText ?? '—'}`),
         run.roles !== '' ? h('div', null, `运行角色配置（非实际派发）：${run.roles}`) : null,
       ),
     ),
+    h('div', { className: 'wf-monitor-overview' },
     graph !== null && flow !== null ? h('div', { className: 'wf-monitor-graph' },
       h('style', null, EDITOR_STYLES),
       callPath.frames.length > 1 ? h('div', { className: 'wf-monitor-breadcrumb', role: 'navigation', 'aria-label': '流程路径' },
@@ -452,14 +459,16 @@ export function WorkflowMonitorTab({ fetchStatus, visible = true, scope }) {
           },
         })),
     ) : null,
-    // #274 当前执行卡：图下独立区块，始终指向当前（或结束）工作单；与选中/流程切换无关。
-    currentCardEl(view.currentExecution),
+    // 始终指向当前（或结束）工作单，与历史行展开/流程切换无关。
+    currentCardEl(view.currentExecution)),
     // #275 执行记录表：每次进入一行；多轮提交/判定、未形成提交的重派与换模收在行下钻。
     recordsEl(view.records, openRecord, key => setOpenRecord(current => (current === key ? null : key))),
-    h('div', null,
-      h('button', { type: 'button', onClick: () => setPromptOpen(open => !open) }, promptOpen ? '收起启动 prompt' : '展开启动 prompt'),
-      promptOpen ? h('div', { className: 'wf-monitor-prompt' }, run.launchPrompt) : null,
-    ),
+    h('details', { key: `${run.runId}:prompt`, className: 'wf-monitor-details' },
+      h('summary', null, '启动 prompt'),
+      h('div', { className: 'wf-monitor-prompt' }, run.launchPrompt)),
+    ...view.nodes.filter(node => node.blocked && !node.current).map(node => h('div', { key: `${node.key}:block`, className: 'wf-node-block' }, `${node.label} · BLOCK：${node.blockReason}`)),
+    h('details', { key: `${run.runId}:nodes`, className: 'wf-monitor-details' },
+    h('summary', null, '完整节点列表'),
     h('ul', { className: 'wf-monitor-nodes' },
       ...view.nodes.map(node => h('li', { key: node.key, className: `wf-monitor-node${node.current ? ' wf-node-current' : ''}` },
         h('span', null, node.label),
@@ -470,6 +479,6 @@ export function WorkflowMonitorTab({ fetchStatus, visible = true, scope }) {
         h('span', { className: `wf-node-phase ${node.phaseClass}` }, node.phaseLabel),
         node.visit > 1 ? h('span', { className: 'wf-monitor-muted' }, `第${node.visit}次`) : null,
         node.blocked ? h('span', { className: 'wf-node-block' }, `BLOCK：${node.blockReason}`) : null,
-      ))),
+      )))),
   )
 }
