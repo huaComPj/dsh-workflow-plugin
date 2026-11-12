@@ -3,7 +3,7 @@
  * interfaces (design §2.3 deployment / §4 runtime).
  */
 import { setTimeout as delay } from 'node:timers/promises'
-import type { Agent, AgentHandle, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type Agent, type AgentHandle, type AgentOptions, type AgentSetup, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import { ManualCompactionError, type CompactionEngine } from '@deepseek-ai/dsh-compaction'
 // Type-only：让 ctx.get('agentPresets') 解析到 preset 服务类型。运行期该服务
@@ -180,16 +180,80 @@ const PLUGIN_SOURCE = WORKFLOW_DISPATCH_SOURCE
 /** #216：Judge 派生 preset 的 scope 名（角色用 roleKey 本身）。 */
 const JUDGE_PRESET_SCOPE = 'judge'
 
-/**
- * Queue one dispatcher turn to a continuable child, bounded by the `send` SLO.
- * Every send site shares this shape so the timeout and the abort wiring cannot
- * drift apart per caller.
- */
-async function queueDispatch(subagents: SubagentRuntime, parent: Agent, childId: string, text: string): Promise<string> {
+/** #287：只持有本插件正在放行的派发；精确 Agent 更代后必须重新安装 scoped overlay。 */
+interface PendingModelSelection {
+  parent: Agent
+  route: DelegationRoute
+  signal: AbortSignal
+}
+const modelSelections = new WeakMap<Context, {
+  pending: Map<string, PendingModelSelection>
+  apply(agent: Agent, selection: PendingModelSelection): void
+}>()
+
+function modelSelectionsFor(ctx: Context) {
+  let selections = modelSelections.get(ctx)
+  if (selections !== undefined) return selections
+  const installed = new WeakMap<Agent, ModelSelectionRef>()
+  const pending = new Map<string, PendingModelSelection>()
+  const apply = (agent: Agent, selection: PendingModelSelection): void => {
+    selection.signal.throwIfAborted()
+    if (!ctx.agents.isOwnedBy(agent.id, selection.parent)) throw new WorkflowError('dispatch model target is not owned by its Manager')
+    const inherited = parentAgentOptionsForDelegation(agent)
+    const options = spawnAgentOptions(selection.route)
+    const provider = options?.provider ?? inherited.provider
+    const model = options?.model ?? inherited.model
+    if (provider === undefined || model === undefined) throw new WorkflowError('dispatch model route is incomplete')
+    let ref = installed.get(agent)
+    if (ref === undefined) {
+      ref = { current: undefined, assembled: undefined }
+      installModelSelection(agent.ctx, ref)
+      installed.set(agent, ref)
+    }
+    ref.current = { provider, model, ...(options?.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }) }
+  }
+  // 正式 agent/created 是 awaited 初始化屏障；subagent/start 并非 async gate。
+  ctx.on('agent/created', ({ agent }) => {
+    const selection = pending.get(agent.id)
+    if (selection !== undefined) apply(agent, selection)
+    return undefined
+  })
+  selections = { pending, apply }
+  modelSelections.set(ctx, selections)
+  return selections
+}
+
+/** Queue 前才更新选择，避免新路由改写仍在运行的旧 turn 后续 step；冷物化由 awaited hook 接手。 */
+async function queueDispatch(ctx: Context, parent: Agent, childId: string, text: string, route?: DelegationRoute): Promise<string> {
   const controller = new AbortController()
-  return withTimeout(
-    queueHostSubagentPrompt(subagents, parent, SessionId(childId), textBlocks(text), PLUGIN_SOURCE, controller.signal),
-    DISPATCH_TIMEOUTS.send, 'send', controller)
+  const send = async (): Promise<string> => {
+    // 无 frozen route 的旧调用保留原继承语义；生产 engine 总是传本 Dispatch 快照。
+    if (route === undefined) return queueHostSubagentPrompt(ctx.subagents, parent, SessionId(childId), textBlocks(text), PLUGIN_SOURCE, controller.signal)
+    const selections = modelSelectionsFor(ctx)
+    if (selections.pending.has(childId)) throw new WorkflowError('another dispatch model selection is pending for this Session')
+    const selection = { parent, route: { ...route }, signal: controller.signal }
+    selections.pending.set(childId, selection)
+    const release = (): void => { if (selections.pending.get(childId) === selection) selections.pending.delete(childId) }
+    controller.signal.addEventListener('abort', release, { once: true })
+    try {
+      let resident = ctx.agents.get(SessionId(childId))
+      while (resident !== undefined) {
+        await resident.whenIdle()
+        controller.signal.throwIfAborted()
+        const current = ctx.agents.get(SessionId(childId))
+        if (current === undefined) break
+        if (current !== resident || current.status !== 'idle') { resident = current; continue }
+        selections.apply(current, selection)
+        break
+      }
+      controller.signal.throwIfAborted()
+      return await queueHostSubagentPrompt(ctx.subagents, parent, SessionId(childId), textBlocks(text), PLUGIN_SOURCE, controller.signal)
+    } finally {
+      controller.signal.removeEventListener('abort', release)
+      release()
+    }
+  }
+  return withTimeout(send(), DISPATCH_TIMEOUTS.send, 'send', controller)
 }
 
 /**
@@ -268,7 +332,8 @@ export function makeDispatchTargets(adapters: HostAdapters): DispatchTargets {
       manager.steer(message)
       return { messageId: message.id }
     },
-    async sendRoleActor(run, roleKey, text) {
+    async sendRoleActor(run, roleKey, text, model) {
+      const route = model === undefined ? undefined : { ...model }
       const manager = adapters.managerAgentOf(run)
       if (manager === undefined) throw new WorkflowError('manager agent is not live in this process')
       const childId = run.roleActors[roleKey]
@@ -278,7 +343,7 @@ export function makeDispatchTargets(adapters: HostAdapters): DispatchTargets {
       // resume、REJECT/BLOCK 后复用）同样需要可 mount 的 preset。幂等，已注册即返回。
       await ensureRolePreset(adapters, run, roleKey, manager)
       // Workflow 派发必须是独立 child turn，不可用 nearest-step sendMessage。
-      const messageId = await queueDispatch(adapters.ctx.subagents, manager, childId, text)
+      const messageId = await queueDispatch(adapters.ctx, manager, childId, text, route)
       return { messageId }
     },
     managerSessionSeq(run) {
@@ -383,7 +448,8 @@ export function makeSubagentHost(adapters: HostAdapters, participants: Participa
     // Issue #247：观察模块的唯一持有者（引擎经此发布/消费，index.ts 的生命周期
     // 监听只报告原始 start/end 边，不自行维护世代或暂存）。
     dispatchLifecycle: lifecycle,
-    async ensureRoleActor(run, roleKey, initialText) {
+    async ensureRoleActor(run, roleKey, initialText, model) {
+      const selected = model === undefined ? undefined : { ...model }
       const manager = adapters.managerAgentOf(run)
       if (manager === undefined) throw new WorkflowError('manager agent is not live in this process')
       const existing = run.roleActors[roleKey]
@@ -392,12 +458,12 @@ export function makeSubagentHost(adapters: HostAdapters, participants: Participa
         // correct continuation for an existing mapping. Preset 幂等重建：进程
         // 重启后注册表为空，冷 resume 需要同 id preset 可 mount。
         await ensureRolePreset(adapters, run, roleKey, manager)
-        const messageId = await queueDispatch(adapters.ctx.subagents, manager, existing, initialText)
+        const messageId = await queueDispatch(adapters.ctx, manager, existing, initialText, selected)
         return { childId: existing, messageId }
       }
       const roleDef = run.definitionSnapshot.roles[roleKey]
       if (roleDef === undefined) throw new WorkflowError(`unknown role "${roleKey}"`)
-      const route = resolveRoleModel(run, roleKey, routeOf(run))
+      const route = selected ?? resolveRoleModel(run, roleKey, routeOf(run))
       // Issue #216：persona/deny 不再走 spawn 请求（0.2.1 已移除该字段），改为
       // 动态 preset 组装；deny 名单按 Manager 实际工具面求交集——restrict 对
       // 未知 global 名直接抛错（fail-closed），deny 一个不存在的工具本就是 no-op。
@@ -424,6 +490,7 @@ export function makeSubagentHost(adapters: HostAdapters, participants: Participa
     },
 
     async startJudge(run, input) {
+      const model = input.model === undefined ? undefined : { ...input.model }
       const manager = adapters.managerAgentOf(run)
       if (manager === undefined) throw new WorkflowError('manager agent is not live in this process')
       const plan = judgeSpawnPlan(run, routeOf(run))
@@ -451,7 +518,7 @@ export function makeSubagentHost(adapters: HostAdapters, participants: Participa
           prompt: textBlocks(prompt),
           parent: manager,
           ...(agentPreset === undefined ? {} : { agentPreset }),
-          agentOptions: spawnAgentOptions(plan.agentOptions),
+          agentOptions: spawnAgentOptions(model ?? plan.agentOptions),
         },
       }, 'spawn judge')
 
@@ -486,11 +553,12 @@ export function makeSubagentHost(adapters: HostAdapters, participants: Participa
     },
 
     async followupJudge(run, judgeSessionId, input) {
+      const model = input.model === undefined ? undefined : { ...input.model }
       const manager = adapters.managerAgentOf(run)
       if (manager === undefined) throw new WorkflowError('manager agent is not live in this process')
       // 幂等重建（进程重启后冷 resume 需要同 id preset 可 mount）。
       await ensureRolePreset(adapters, run, JUDGE_PRESET_SCOPE, manager)
-      const messageId = await queueDispatch(adapters.ctx.subagents, manager, judgeSessionId, await judgePrompt(run, input))
+      const messageId = await queueDispatch(adapters.ctx, manager, judgeSessionId, await judgePrompt(run, input), model)
       adapters.registerJudgeSession(judgeSessionId, input.cwd)
       return { messageId }
     },

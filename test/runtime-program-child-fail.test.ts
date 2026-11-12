@@ -307,7 +307,7 @@ test('explicit Program retry rotates invocation identity and ignores the late fi
   } finally { first.resolve({ kind: 'ERROR', reason: 'cleanup' }); h.close() }
 })
 
-test('model override safely replaces one blocked Role once and leaves Judge replacement explicit', async () => {
+test('#287 active/blocked model configuration preserves Sessions and does not bypass resume safety', async () => {
   // 后继已登记且带 Role 映射的现场（Child 调用层的同类现场由 v3-child-returns.test.ts 覆盖）。
   const config: WorkflowConfig = {
     schemaVersion: 'agent-workflow/v3', roles: { worker: { persona: 'Worker' } }, judgeRole: { persona: 'Read only' },
@@ -325,39 +325,37 @@ test('model override safely replaces one blocked Role once and leaves Judge repl
     const oldActor = h.caller(row.execution.dispatch!)
     const activeBefore = structuredClone(row)
     h.setSafe(true)
-    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'early-provider', 'early-model', 'manager')).ok, false)
-    assert.deepEqual(await h.row(), activeBefore)
-    assert.equal((await h.engine.handleBlock('ws', row.execution.nodeToken, 'replace this blocked Role', oldActor)).ok, true)
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'early-provider', 'early-model', 'manager')).ok, true)
+    assert.deepEqual((await h.row()).execution, activeBefore.execution, '保存配置不撤销在途派发')
+    assert.equal((await h.row()).run.roleActors.worker, 'worker-session')
+    assert.equal((await h.engine.handleBlock('ws', row.execution.nodeToken, 'pause before next dispatch', oldActor)).ok, true)
     row = await h.row()
     h.setSafe(false)
     h.setActivity('active')
-    const denied = await h.engine.handleSetRoleModel('ws', 'worker', ' next-provider ', ' next-model ', 'manager')
-    assert.equal(denied.ok, false)
-    assert.equal((await h.row()).run.roleActors.worker, 'worker-session')
-
-    h.setSafe(false)
-    h.setActivity('unknown')
     assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', ' next-provider ', ' next-model ', 'manager')).ok, true)
+    assert.equal((await h.row()).run.roleActors.worker, 'worker-session')
+    assert.equal((await h.engine.handleResume('ws', row.execution.nodeToken, 'Still active; must not dispatch.', 'manager', 'actor')).ok, false)
+    assert.equal((await h.row()).run.status, 'blocked', '设模并未绕过恢复安全检查')
+
+    h.setSafe(true)
+    h.setActivity('idle')
     row = await h.row()
     assert.deepEqual(row.run.modelOverrides.worker, { provider: 'next-provider', modelId: 'next-model' })
-    assert.equal(row.run.roleActors.worker, undefined)
-    assert.equal((await h.engine.handleResume('ws', row.execution.nodeToken, 'Use the replacement Role.', 'manager', 'actor')).ok, true)
+    assert.equal((await h.engine.handleResume('ws', row.execution.nodeToken, 'Use the next model in the same Role.', 'manager', 'actor')).ok, true)
     const replacement = await h.row()
-    assert.equal(replacement.execution.dispatch?.sessionId, 'worker-replacement-2')
-    assert.equal(replacement.run.roleActors.worker, 'worker-replacement-2')
-    assert.equal((await h.engine.handleClaim('ws', { result: 'succeeded', handoff: 'late old Role' }, oldActor)).ok, false)
+    assert.equal(replacement.execution.dispatch?.sessionId, 'worker-session')
+    assert.equal(replacement.run.roleActors.worker, 'worker-session')
+    assert.deepEqual(replacement.execution.dispatch?.model, { provider: 'next-provider', modelId: 'next-model' })
+    assert.equal((await h.engine.handleClaim('ws', { result: 'succeeded', handoff: 'late old dispatch' }, oldActor)).ok, false)
 
-    // #153 T4：同模型 set 不再是无条件 no-op——存活映射可能仍携带旧档位，
-    // 仅 snapshot/override 无 effort 字段不足以判定无变化。working 中的会话先
-    // 走既有安全生命周期（block 后才能替换，不强行中断）。
-    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'next-provider', 'next-model', 'manager')).ok, false)
-    const replacementActor = h.caller(replacement.execution.dispatch!)
-    assert.equal((await h.engine.handleBlock('ws', replacement.execution.nodeToken, 'retire the same-model session', replacementActor)).ok, true)
     const sameSet = await h.engine.handleSetRoleModel('ws', 'worker', 'next-provider', 'next-model', 'manager')
     assert.equal(sameSet.ok, true)
-    assert.equal(sameSet.message, 'model override saved for worker')
-    assert.deepEqual((await h.row()).run.modelOverrides.worker, { provider: 'next-provider', modelId: 'next-model' })
-    assert.equal((await h.row()).run.roleActors.worker, undefined, 'T4: 同模型 set 有存活映射时仍退役旧会话，后续派发回落模型默认')
+    assert.equal(sameSet.message, 'next dispatch primary saved for worker')
+    const afterSame = await h.row()
+    assert.equal(afterSame.run.roleModelConfigs!.worker!.revision, 3, '同值主动保存仍开启新轮')
+    assert.deepEqual(afterSame.execution, replacement.execution)
+    assert.deepEqual(afterSame.run.modelOverrides.worker, { provider: 'next-provider', modelId: 'next-model' })
+    assert.equal(afterSame.run.roleActors.worker, 'worker-session')
     const beforeJudgeOverride = await h.row()
     assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'judge-provider', 'judge-model', 'manager')).ok, true)
     const judgeOverride = await h.row()

@@ -19,10 +19,18 @@ import * as CordisLoader from '@deepseek-ai/cordis-plugin-loader'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { LlmAdapter, ToolCallId, type GenerateOptions, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmAdapter, ReasoningEffortId, ToolCallId, type GenerateOptions, type LlmModelInfo, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import { scanCatalog } from '../src/catalog/loader.ts'
 import { WORKFLOW_DISPATCH_SOURCE } from '../src/message-sources.ts'
+import { makeDispatchTargets, makeSubagentHost, type HostAdapters } from '../src/plugin/host.ts'
+import { RolePresetBook } from '../src/plugin/presets.ts'
+import { validateAndNormalize } from '../src/catalog/validate.ts'
+import { parseCatalogConfig } from '../src/catalog/parse.ts'
+import type { NodeExecution, NodeExecutionEvent, RunState } from '../src/types.ts'
+import { testParticipants } from './helpers/participants.ts'
+import { DISPATCH_TIMEOUTS } from '../src/engine/timeouts.ts'
+import { JUDGE_REQUIRED_TOOLS } from '../src/roles/roles.ts'
 
 const MODEL = 'scripted-a30'
 const SUMMARY = 'A30 COMPACT CHECKPOINT: first Role visit completed and its accepted handoff is authoritative.'
@@ -276,6 +284,368 @@ class A5ReplyAdapter extends LlmAdapter {
     yield* textChunks(`A5 reply ${this.calls}: ${messageText(options).slice(-40)}`)
   }
 }
+
+/** #287：脚本只控制模型响应，路由/档位/上下文均经真实 Host request 观测。 */
+class A287ModelAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = []
+  readonly firstStarted = Promise.withResolvers<void>()
+  readonly releaseFirst = Promise.withResolvers<void>()
+
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({ provider, id: model, name: model, context: { contextWindow: 100_000 },
+      reasoning: { efforts: ['high', 'low'].map(id => ({ id: ReasoningEffortId(id), name: id })) } })
+  }
+
+  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (String(options.sessionId) === 'a287-manager') { yield* textChunks('Manager observes the child completion.'); return }
+    this.requests.push(options)
+    if (this.requests.length === 1) {
+      this.firstStarted.resolve()
+      await this.releaseFirst.promise
+      yield* toolChunks('a287-probe', 'route_probe', {})
+    } else {
+      yield* textChunks(`A287 reply ${this.requests.length}`)
+    }
+  }
+}
+
+test('A287 real DSH Host applies frozen Role/Judge models before warm/cold dispatch without rewriting old steps', { timeout: 20_000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), 'workflow-a287-model-'))
+  const workspace = join(home, 'workspace')
+  mkdirSync(workspace, { recursive: true })
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = new Context()
+  const adapter = new A287ModelAdapter()
+  try {
+    await mountSubagentContractHost(ctx, { workspace, sessions: join(home, 'sessions'), presetId: 'a287-base', adapter })
+    const nextProvider = 'scripted-a287-other'
+    ctx.llm.registerAdapter([nextProvider], adapter)
+    ctx.tools.register(defineTool({ name: 'route_probe', description: 'Finish the old dispatch second step.', parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+      async execute() { return 'old dispatch probe finished' } }))
+    const manager = await ctx.agentLoop.create(SessionId('a287-manager'), { provider: MODEL, model: 'manager' }, { cwd: workspace })
+    const definition = validateAndNormalize(parseCatalogConfig(`schemaVersion: agent-workflow/v3
+roles:
+  worker: { reuse: continuable, persona: Complete the isolated work. }
+judgeRole: { persona: Verify the isolated handoff. }
+workflow:
+  startNode: work
+  returns: [done]
+  nodes:
+    work:
+      execution: { type: actor-task, role: manager, instruction: Work. }
+      checker: { checkerId: judge.claim-correct, config: { criteria: Correct. } }
+      results:
+        succeeded: { criteria: Complete., target: { return: done } }
+`), { workflowId: 'a287' })
+    const run: RunState = { runId: crypto.randomUUID(), managerSessionId: manager.id, catalogWorkflowId: 'a287',
+      definitionHash: 'isolated-host', definitionSnapshot: definition, status: 'running',
+      callStack: [{ workflowId: 'a287', nodeId: 'work', nodeToken: crypto.randomUUID() }],
+      roleActors: {}, modelOverrides: {}, blockReason: null, currentExecutionId: 'a287-execution' }
+    const adapters: HostAdapters = { ctx, managerAgentOf: () => manager, presets: new RolePresetBook(),
+      registerRoleActorSession() {}, registerJudgeSession() {}, revokeJudgeSession() {} }
+    const host = makeSubagentHost(adapters, testParticipants(ctx))
+    const targets = makeDispatchTargets(adapters)
+    const first = await host.ensureRoleActor(run, 'worker', 'A287 FIRST_DISPATCH', { provider: MODEL, modelId: 'model-a', reasoningEffort: 'high' })
+    run.roleActors.worker = first.childId
+    const starts: string[] = []
+    const ends: string[] = []
+    ctx.on('subagent/start', info => { if (String(info.id) === first.childId) starts.push(String(info.runId)) })
+    ctx.on('subagent/end', info => { if (String(info.id) === first.childId) ends.push(String(info.runId)) })
+    await adapter.firstStarted.promise
+    const originalPrefix = JSON.stringify(ctx.agents.get(SessionId(first.childId))!.session.snapshotEvents())
+    const sendTimeout = DISPATCH_TIMEOUTS.send
+    DISPATCH_TIMEOUTS.send = 10
+    try {
+      await assert.rejects(targets.sendRoleActor(run, 'worker', 'A287 MUST_NOT_QUEUE', { provider: MODEL, modelId: 'timed-out-route' }), /timeout.*stage "send"/)
+    } finally { DISPATCH_TIMEOUTS.send = sendTimeout }
+    assert.equal(adapter.requests.length, 1, 'a blocked model switch cannot dispatch before the old turn is idle')
+    const route = { provider: nextProvider, modelId: 'model-c' }
+    const second = targets.sendRoleActor(run, 'worker', 'A287 SECOND_DISPATCH', route)
+    // 传入后改变源对象不能改变已经登记的派发快照；旧 turn 的下一步也仍使用 A/high。
+    route.modelId = 'should-not-leak'
+    adapter.releaseFirst.resolve()
+    await second
+    await waitFor(async () => adapter.requests.length >= 3 && ends.length >= 1 ? true : undefined)
+    assert.deepEqual(adapter.requests.slice(0, 3).map(request => [request.provider, request.model, request.reasoningEffort]),
+      [[MODEL, 'model-a', 'high'], [MODEL, 'model-a', 'high'], [nextProvider, 'model-c', undefined]])
+    assert.match(messageText(adapter.requests[2]!), /A287 FIRST_DISPATCH/)
+    assert.match(messageText(adapter.requests[2]!), /A287 reply 2/)
+    assert.match(messageText(adapter.requests[2]!), /A287 SECOND_DISPATCH/)
+    assert.ok(adapter.requests.every(request => String(request.sessionId) === first.childId))
+    assert.equal(starts.length, 0, 'the first followup must select C inside the existing warm residency epoch')
+    assert.equal(ctx.agents.get(SessionId(first.childId)), undefined, 'next queue must exercise cold materialization')
+    const persisted = await ctx.sessionPersistence.open(SessionId(first.childId), 'read')
+    try {
+      const events = (await persisted.read(0)).events
+      const prefix = JSON.parse(originalPrefix) as SessionEvent[]
+      assert.equal(JSON.stringify(events.slice(0, prefix.length)), originalPrefix, 'model selection cannot rewrite historical events')
+    } finally { await persisted.close() }
+    await targets.sendRoleActor(run, 'worker', 'A287 COLD_ROLE_DISPATCH', { provider: MODEL, modelId: 'model-d', reasoningEffort: 'low' })
+    await waitFor(async () => adapter.requests.length >= 4 && ends.length >= 2 ? true : undefined)
+    assert.deepEqual([adapter.requests[3]!.provider, adapter.requests[3]!.model, adapter.requests[3]!.reasoningEffort], [MODEL, 'model-d', 'low'])
+    assert.equal(starts.length, 1, 'cold Role continuation must publish one new residency epoch')
+    assert.ok(adapter.requests.every(request => String(request.sessionId) === first.childId))
+
+    // 真正创建 Judge Session，再冷续接同 id：首派冻结路由与省略 effort 的清除均须到达 adapter。
+    for (const name of JUDGE_REQUIRED_TOOLS) ctx.tools.register(defineTool({ name, description: `A287 isolated ${name}.`, parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, async execute() { return 'fixture' } }))
+    const judgeId = 'a287-judge'
+    const judgeEnds: string[] = []
+    ctx.on('subagent/end', info => { if (String(info.id) === judgeId) judgeEnds.push(String(info.runId)) })
+    const judgeInput = { nodeToken: run.callStack[0]!.nodeToken, criteria: 'Correct.', result: 'succeeded', resultCriteria: 'Complete.',
+      boundary: { dispatchedAt: 0, managerFromSeq: 0 }, claim: { result: 'succeeded', handoff: 'A287 JUDGE_DISPATCH' },
+      cwd: workspace, workspace, judgeSessionId: judgeId, model: { provider: MODEL, modelId: 'model-e', reasoningEffort: 'low' } }
+    await host.startJudge(run, judgeInput)
+    await waitFor(async () => adapter.requests.length >= 5 && judgeEnds.length === 1 ? true : undefined)
+    assert.equal(ctx.agents.get(SessionId(judgeId)), undefined)
+    await host.followupJudge(run, judgeId, { ...judgeInput, model: { provider: MODEL, modelId: 'model-e' } })
+    await waitFor(async () => adapter.requests.length >= 6 && judgeEnds.length === 2 ? true : undefined)
+    assert.deepEqual(adapter.requests.slice(4).map(request => [request.model, request.reasoningEffort]),
+      [['model-e', 'low'], ['model-e', undefined]])
+    assert.ok(adapter.requests.slice(4).every(request => String(request.sessionId) === judgeId))
+    assert.match(messageText(adapter.requests[5]!), /A287 reply 5/)
+  } finally {
+    adapter.releaseFirst.resolve()
+    await ctx.fiber.dispose()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+/** #287：仍用既有 Host 组合，只在实际请求边界控制失败/成功；不替换 Engine 或工具注册。 */
+class A287ManagerToolAdapter extends LlmAdapter {
+  readonly targets: Array<{ options: GenerateOptions; finish: ReturnType<typeof Promise.withResolvers<'fail' | 'accept'>> }> = []
+  managerCall: { id: string; name: string; args: object } | undefined
+  beforeJudge: (() => Promise<void>) | undefined
+  stopping = false
+  private kickoffClaimed = false
+  private call = 0
+
+  readonly target: 'worker' | 'judge'
+  readonly managerId: string
+  constructor(target: 'worker' | 'judge', managerId: string) {
+    super()
+    this.target = target
+    this.managerId = managerId
+  }
+
+  override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    return Promise.resolve(['manager', 'A', 'B', 'C'].map(id => ({ provider, id, name: id })))
+  }
+
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({ provider, id: model, name: model, context: { contextWindow: 100_000 },
+      reasoning: { efforts: ['high', 'low', 'medium'].map(id => ({ id: ReasoningEffortId(id), name: id })), ...(model === 'C' ? { defaultEffort: ReasoningEffortId('medium') } : {}) } })
+  }
+
+  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (options.purpose === 'compaction') { yield* textChunks(SUMMARY); return }
+    const manager = String(options.sessionId) === this.managerId
+    const tools = new Set((options.tools ?? []).map(tool => tool.name))
+    const judge = !manager && tools.has('judge_claim') && !tools.has('node_claim')
+    const actor = !manager && tools.has('node_claim')
+    if (!this.stopping && (this.target === 'judge' ? judge : actor)) {
+      const finish = Promise.withResolvers<'fail' | 'accept'>()
+      this.targets.push({ options, finish })
+      // dispose 时也能放行，测试断言失败不会留下永不结算的模型流。
+      options.signal?.addEventListener('abort', () => finish.resolve('accept'), { once: true })
+      if (await finish.promise === 'fail') {
+        yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', status: 503, message: 'A287 scripted eligible provider failure' } } }
+        return
+      }
+    }
+    if (manager) {
+      const pending = this.managerCall
+      if (pending) {
+        this.managerCall = undefined
+        yield* toolChunks(pending.id, pending.name, pending.args)
+      } else if (!this.kickoffClaimed && messageText(options).includes('A287 CHAIN KICKOFF')) {
+        this.kickoffClaimed = true
+        yield* toolChunks(`a287-chain-${++this.call}`, 'node_claim', { result: 'succeeded', handoff: 'A287 isolated Manager kickoff complete.' })
+      } else yield* textChunks('Manager observes the isolated workflow notice.')
+    } else if (judge) {
+      await this.beforeJudge?.()
+      const token = messageText(options).match(/"nodeToken": "([^"]+)"/)?.[1]
+      assert.ok(token, 'real Judge packet must carry the current nodeToken')
+      yield* toolChunks(`a287-chain-${++this.call}`, 'judge_claim', { nodeToken: token, result: 'ACCEPT', reason: 'A287 scripted read-only acceptance.' })
+    } else if (actor) {
+      yield* toolChunks(`a287-chain-${++this.call}`, 'node_claim', { result: 'succeeded', handoff: 'A287 Role accepted with its frozen actual request route.' })
+    } else yield* textChunks('No workflow mutation.')
+  }
+}
+
+test('A287 registered Manager model tool reaches real Engine dispatch snapshots and Host requests for Role/Judge', { timeout: 30_000 }, async t => {
+  for (const target of ['worker', 'judge'] as const) await t.test(target, async () => {
+    const root = mkdtempSync(join(tmpdir(), `dsh-a287-manager-${target}-`))
+    const home = join(root, 'home')
+    const workspace = join(root, 'workspace')
+    const sessions = join(root, 'sessions')
+    mkdirSync(join(home, 'workflows'), { recursive: true })
+    mkdirSync(workspace)
+    mkdirSync(sessions)
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    const ctx = new Context()
+    const managerId = `a287-chain-manager-${target}`
+    const adapter = new A287ManagerToolAdapter(target, managerId)
+    const starts: Array<{ id: string; runId: string }> = []
+    const ends: Array<{ id: string; runId: string; released: boolean }> = []
+    const epochs: Array<{ id: string; runId: string }> = []
+    ctx.on('subagent/start', info => { starts.push({ id: String(info.id), runId: String(info.runId) }) })
+    ctx.on('subagent/end', info => { ends.push({ id: String(info.id), runId: String(info.runId), released: ctx.agents.get(info.id) === undefined }) })
+    if (target === 'worker') adapter.beforeJudge = async () => {
+      const previous = epochs.at(-1)
+      if (previous) await waitFor(async () => ends.some(end => end.runId === previous.runId && end.released) ? true : undefined)
+    }
+    // 三个正常节点提供后续派发；Judge 每节点新建会话是既有生命周期，不把换模归因为 fresh。
+    const visits = target === 'worker' ? ['first', 'second', 'third'] : ['second', 'third']
+    writeFileSync(join(home, 'workflows', 'a287-chain.yaml'), `schemaVersion: agent-workflow/v3
+roles:
+  worker:
+    persona: A287 isolated Role.
+    reuse: continuable
+    compactBeforeReuse: false
+${target === 'worker' ? `    model: { provider: ${MODEL}, modelId: A, reasoningEffort: high }
+    fallbackModel: { provider: ${MODEL}, modelId: B, reasoningEffort: low }
+` : ''}judgeRole:
+  persona: A287 isolated read-only Judge.
+${target === 'judge' ? `  model: { provider: ${MODEL}, modelId: A, reasoningEffort: high }
+  fallbackModel: { provider: ${MODEL}, modelId: B, reasoningEffort: low }
+` : ''}workflow:
+  startNode: kickoff
+  returns: [done]
+  nodes:
+    kickoff:
+      execution: { type: actor-task, role: manager, instruction: A287 CHAIN KICKOFF }
+      checker: { checkerId: judge.claim-correct, config: { criteria: Accept isolated Manager kickoff. } }
+      results:
+        succeeded: { criteria: Manager ready., target: { node: ${visits[0]} } }
+${visits.map((id, index) => `    ${id}:
+      execution: { type: actor-task, role: worker, instruction: A287 ${id} accepted route visit. }
+      checker: { checkerId: judge.claim-correct, config: { criteria: Accept isolated Role handoff. } }
+      results:
+        succeeded: { criteria: Role ready., target: ${index + 1 < visits.length ? `{ node: ${visits[index + 1]} }` : '{ return: done }'} }
+`).join('')}`)
+    try {
+      await mountSubagentContractHost(ctx, { workspace, sessions, presetId: 'a287-chain-preset', adapter })
+      await ctx.plugin(CommandRuntime)
+      for (const name of ['read', 'glob', 'grep', 'read_image'] as const) ctx.tools.register(readOnlyFixtureTool(name))
+      const WorkflowPlugin = await import('../src/index.ts')
+      await ctx.plugin(WorkflowPlugin)
+      const manager = await ctx.agentLoop.create(SessionId(managerId), { provider: MODEL, model: 'manager' }, { cwd: workspace })
+      const signal = new AbortController().signal
+      let managerCalls = 0
+      const invoke = async (name: 'workflow_set_role_model' | 'workflow_status', args: object): Promise<string> => {
+        const id = `a287-manager-tool-${++managerCalls}`
+        assert.equal(adapter.managerCall, undefined)
+        adapter.managerCall = { id, name, args }
+        manager.followup(createUserMessage({ content: [{ type: 'text', text: `Execute registered Manager tool ${id}.` }], source: WORKFLOW_DISPATCH_SOURCE }))
+        const output = await waitFor(async () => {
+          const event = manager.session.snapshotEvents().find(event => event.type === 'tool/result' && event.data.message.toolCallId === id)
+          if (event?.type !== 'tool/result') return undefined
+          assert.notEqual(event.data.message.isError, true, JSON.stringify(event.data))
+          return event.data.message.content.map(blockText).join('\n')
+        }, 3_000).catch(error => { throw new Error(`${String(error)} pending=${JSON.stringify(adapter.managerCall)} events=${JSON.stringify(manager.session.snapshotEvents().slice(-12))}`) })
+        await manager.whenIdle()
+        assert.ok(!output.startsWith('拒绝：'), output)
+        return output
+      }
+      const status = () => ctx.commands.execute(manager, '/dsh-flow status', [], signal).then(commandJson)
+      const frozen = async (): Promise<NodeExecution> => {
+        const current = await status()
+        const history = JSON.parse(await invoke('workflow_status', { executionId: current.execution.executionId })) as { history: { events: NodeExecutionEvent[] } }
+        const snapshot = history.history.events.at(-1)?.snapshot
+        assert.ok(snapshot)
+        return snapshot
+      }
+      const targetRequest = async (index: number) => {
+        const request = await waitFor(async () => adapter.targets[index])
+        const epoch = starts.findLast(info => info.id === String(request.options.sessionId))
+        assert.ok(epoch, 'every actual request belongs to a real Host residency epoch')
+        epochs[index] = epoch
+        return request
+      }
+      const route = (snapshot: NodeExecution) => target === 'worker' ? snapshot.dispatch : snapshot.judge
+      const requestRoute = (index: number) => {
+        const options = adapter.targets[index]!.options
+        return [options.provider, options.model, options.reasoningEffort]
+      }
+      const setC = () => invoke('workflow_set_role_model', { roleKey: target, provider: MODEL, modelId: 'C' })
+      const summary = async (stage: 'primary' | 'fallback', switches: number) => {
+        const current = await status()
+        const selected = current.routes.find((entry: { role: string }) => entry.role === target)
+        assert.equal(selected.stage, stage)
+        assert.equal(selected.autoSwitches, switches)
+        assert.equal(selected.fallback, `${MODEL}/B/low`)
+      }
+      const started = await ctx.commands.execute(manager, '/dsh-flow start a287-chain', [], signal)
+      assert.ok(started?.result.kind === 'success', JSON.stringify(started))
+      await targetRequest(0)
+      const initial = await frozen()
+      assert.deepEqual(requestRoute(0), [MODEL, 'A', 'high'])
+      assert.equal(route(initial)?.configRevision, 0)
+      assert.match(await setC(), /next dispatch primary saved/)
+      assert.deepEqual(route(await frozen()), route(initial), 'active A dispatch identity, route and revision stay frozen')
+      await summary('primary', 0)
+      adapter.targets[0]!.finish.resolve('fail')
+      await targetRequest(1)
+      const primary = await frozen()
+      assert.deepEqual(requestRoute(1), [MODEL, 'C', 'medium'], 'omitted override uses C default rather than inherited A/high')
+      assert.equal(route(primary)?.configRevision, 1)
+      assert.equal(route(primary)?.source, 'primary')
+      assert.notEqual(route(primary)?.id, route(initial)?.id)
+      await summary('primary', 0)
+      adapter.targets[1]!.finish.resolve('fail')
+      await targetRequest(2)
+      const fallback = await frozen()
+      assert.deepEqual(requestRoute(2), [MODEL, 'B', 'low'])
+      assert.equal(route(fallback)?.configRevision, 1)
+      assert.equal(route(fallback)?.source, 'fallback')
+      assert.equal(route(fallback)?.sessionId, adapter.targets[0]!.options.sessionId, 'failure retry must preserve the durable Session')
+      await summary('fallback', 1)
+      adapter.targets[2]!.finish.resolve('accept')
+      await targetRequest(3)
+      const later = await frozen()
+      assert.deepEqual(requestRoute(3), [MODEL, 'B', 'low'], 'success does not silently switch back from fallback')
+      assert.equal(route(later)?.source, 'fallback')
+      assert.equal(route(later)?.configRevision, 1)
+      assert.notEqual(later.executionId, fallback.executionId, 'later B belongs to a genuinely new node registration')
+      await summary('fallback', 1)
+      assert.match(await setC(), /next dispatch primary saved/)
+      assert.deepEqual(route(await frozen()), route(later), 'same-route explicit set cannot rewrite the active B dispatch')
+      await summary('primary', 0)
+      adapter.targets[3]!.finish.resolve('accept')
+      await targetRequest(4)
+      const final = await frozen()
+      assert.deepEqual(requestRoute(4), [MODEL, 'C', 'medium'], 'explicit C reset must not inherit fallback B/low')
+      assert.equal(route(final)?.source, 'primary')
+      assert.equal(route(final)?.configRevision, 2, 'same C selected again still creates a new configuration revision')
+      assert.deepEqual(route(final)?.model, { provider: MODEL, modelId: 'C' }, 'omitted effort clears inherited high/low')
+      if (target === 'worker') {
+        assert.equal(new Set(adapter.targets.map(({ options }) => options.sessionId)).size, 1)
+        for (const index of [3, 4]) {
+          assert.notEqual(epochs[index]!.runId, epochs[index - 1]!.runId, 'later B and saved C must cold-materialize rather than fall back to descriptor A')
+          assert.ok(ends.some(end => end.runId === epochs[index - 1]!.runId && end.released), 'the previous real Role residency is released before continuation')
+        }
+      }
+      adapter.targets[4]!.finish.resolve('accept')
+      await waitFor(async () => (await status()).status === 'completed' ? true : undefined)
+      const managerSetCalls = manager.session.snapshotEvents().filter(event => event.type === 'tool/call' && event.data.name === 'workflow_set_role_model')
+      assert.equal(managerSetCalls.length, 2, 'both changes actually passed the registered Manager tool and its caller authorization')
+      assert.equal(adapter.targets.length, 5)
+    } finally {
+      adapter.stopping = true
+      for (const request of adapter.targets) request.finish.resolve('accept')
+      await ctx.fiber.dispose()
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
 
 test('A30 real DSH Host composes cold Role continuation, Basic compaction, Host interrupt, and same-execution resume', { timeout: 30_000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), 'workflow-a30-host-'))

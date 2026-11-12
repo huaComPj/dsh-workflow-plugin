@@ -20,7 +20,7 @@ import { WorkflowEngine, type JudgeSpawnInput, type SubagentHost } from '../src/
 import { makeStateHost } from '../src/plugin/host.ts'
 import { makeDispatchLifecycle, type DispatchLifecycle } from '../src/plugin/dispatch-lifecycle.ts'
 import { turnEndFailure, turnEndFailureFacts, type TurnEndFact } from '../src/plugin/turn-end.ts'
-import { judgeSpawnPlan, resolveRoleModel } from '../src/roles/roles.ts'
+import { judgeSpawnPlan, resolveRoleModel, roleFallbackRoute } from '../src/roles/roles.ts'
 import { StateStore } from '../src/state/store.ts'
 import { routeToAgentOptions, sameRouteIdentity, type RunState, type SpawnAgentOptions, type WorkflowConfig } from '../src/types.ts'
 import { businessEqual, loadDraft, previewDraft, redo, setJudgeFallbackModel, setJudgeModel, setRoleFallbackModel, undo } from '../src/editor/draft.ts'
@@ -191,6 +191,100 @@ test('#235 备用路由进入启动前静态校验行（误配阻断启动）', 
   assert.equal(accepted.ok, true)
 })
 
+test('#287 active Role 保存下一派发主模型，保留会话、备用和在途事实，每次保存独立开轮', async () => {
+  const h = harness()
+  try {
+    await h.start()
+    await h.toWorker()
+    const before = await h.row()
+    const saved = await h.engine.handleSetRoleModel('ws', 'worker', 'manual', 'C', 'manager', 'high')
+    assert.equal(saved.ok, true, JSON.stringify(saved))
+    const after = await h.row()
+    assert.deepEqual(after.execution, before.execution, '配置不是工作单变更，也不撤销旧派发')
+    assert.deepEqual(after.run.roleActors, before.run.roleActors)
+    assert.deepEqual(after.run.definitionSnapshot, before.run.definitionSnapshot)
+    assert.deepEqual(resolveRoleModel(after.run, 'worker', after.run.delegationRoute), { provider: 'manual', modelId: 'C', reasoningEffort: 'high' })
+    assert.equal(roleFallbackRoute(after.run, 'worker')?.modelId, 'backup-model')
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'manual', 'C', 'manager')).ok, true)
+    const repeated = await h.row()
+    assert.equal(resolveRoleModel(repeated.run, 'worker', repeated.run.delegationRoute).reasoningEffort, undefined)
+    assert.equal(repeated.run.roleModelConfigs?.worker.revision, 2)
+    assert.equal(repeated.run.roleRoutes?.worker.autoSwitches, 0)
+  } finally { h.close() }
+})
+
+for (const role of ['worker', 'judge'] as const) {
+  test(`#287 ${role} 旧 A 失败先派新 C，同 Session C→B→BLOCK，重开不刷新预算`, async () => {
+    const config = structuredClone(CONFIG)
+    config.judgeRole.model = { provider: 'primary', modelId: 'primary-model' }
+    config.judgeRole.fallbackModel = { provider: 'backup', modelId: 'backup-model' }
+    const h = harness(config)
+    try {
+      await h.start()
+      const old = role === 'worker' ? await h.toWorker() : await h.toChecking()
+      assert.equal((await h.engine.handleSetRoleModel('ws', role, 'manual', 'C', 'manager')).ok, true)
+      h.reopen()
+      await h.engine.handleTurnEnded('ws', old, FAILOVER_503.text, FAILOVER_503.facts)
+      const primary = await h.row()
+      const dispatch = role === 'worker' ? primary.execution.dispatch! : primary.execution.judge!
+      assert.equal(dispatch.sessionId, old.sessionId)
+      assert.equal(dispatch.model?.modelId, 'C')
+      assert.equal(primary.run.roleRoutes?.[role].autoSwitches, 0, '旧故障不扣新链预算')
+      assert.equal(h.spawns.at(-1)?.agentOptions?.model, 'C', '实际发送消费登记快照')
+      h.reopen()
+      const current = { sessionId: dispatch.sessionId!, turnUserMessageIds: new Set([dispatch.messageId!]) }
+      await h.engine.handleTurnEnded('ws', current, FAILOVER_503.text, FAILOVER_503.facts)
+      const backup = await h.row()
+      const fallbackDispatch = role === 'worker' ? backup.execution.dispatch! : backup.execution.judge!
+      assert.equal(fallbackDispatch.sessionId, old.sessionId)
+      assert.equal(fallbackDispatch.model?.modelId, 'backup-model')
+      assert.equal(backup.run.roleRoutes?.[role].autoSwitches, 1)
+      h.reopen()
+      await h.engine.handleTurnEnded('ws', { sessionId: fallbackDispatch.sessionId!, turnUserMessageIds: new Set([fallbackDispatch.messageId!]) }, FAILOVER_503.text, FAILOVER_503.facts)
+      assert.equal((await h.row()).run.status, 'blocked')
+      assert.equal((await h.engine.handleSetRoleModel('ws', role, 'manual', 'C', 'manager')).ok, true)
+      assert.equal((await h.row()).run.roleRoutes?.[role].stage, 'primary')
+      assert.equal((await h.row()).run.roleModelConfigs?.[role].revision, 2)
+    } finally { h.close() }
+  })
+}
+
+for (const role of ['worker', 'judge'] as const) {
+  test(`#287 ${role} 当前 Run 的 C/D 配置不回落冻结 A/B，设模保留 D`, async () => {
+    const config = structuredClone(CONFIG)
+    config.judgeRole.model = { provider: 'primary', modelId: 'primary-model' }
+    config.judgeRole.fallbackModel = { provider: 'backup', modelId: 'backup-model' }
+    const h = harness(config)
+    try {
+      await h.start()
+      const initial = await h.row()
+      // 持久化端口准备当前 Run 配置；人类写 RPC 属 #288，不在这里伪造新公开入口。
+      const run = structuredClone(initial.run)
+      run.roleModelConfigs = { [role]: { primary: { provider: 'current', modelId: 'C' }, fallback: { provider: 'current', modelId: 'D' }, revision: 1 } }
+      run.modelConfigRevision = 1
+      await h.store.updateRow('ws', run, initial.stateVersion, [])
+      const old = role === 'worker' ? await h.toWorker() : await h.toChecking()
+      assert.equal((await h.engine.handleSetRoleModel('ws', role, 'current', 'C', 'manager')).ok, true)
+      assert.deepEqual(roleFallbackRoute((await h.row()).run, role), { provider: 'current', modelId: 'D' })
+      await h.engine.handleTurnEnded('ws', old, FAILOVER_503.text, FAILOVER_503.facts)
+      let row = await h.row()
+      const primary = role === 'worker' ? row.execution.dispatch! : row.execution.judge!
+      assert.equal(primary.model?.modelId, 'C', '旧修订故障先尝试新主配置')
+      await h.engine.handleTurnEnded('ws', { sessionId: primary.sessionId!, turnUserMessageIds: new Set([primary.messageId!]) }, FAILOVER_503.text, FAILOVER_503.facts)
+      row = await h.row()
+      const fallback = role === 'worker' ? row.execution.dispatch! : row.execution.judge!
+      assert.equal(fallback.model?.modelId, 'D')
+      assert.equal(fallback.sessionId, old.sessionId)
+      assert.equal(h.spawns.at(-1)?.agentOptions?.model, 'D')
+      h.reopen()
+      assert.equal(resolveRoleModel((await h.row()).run, role).modelId, 'D')
+      await h.engine.handleTurnEnded('ws', { sessionId: fallback.sessionId!, turnUserMessageIds: new Set([fallback.messageId!]) }, FAILOVER_503.text, FAILOVER_503.facts)
+      assert.equal((await h.row()).run.status, 'blocked')
+      assert.deepEqual((await h.row()).run.definitionSnapshot, initial.run.definitionSnapshot)
+    } finally { h.close() }
+  })
+}
+
 // ---- 引擎：真实 Runtime 接缝 ----
 
 interface Spawn { label: string; agentOptions?: SpawnAgentOptions; text?: string }
@@ -216,17 +310,17 @@ function harness(config: WorkflowConfig = CONFIG, traceDir?: string, lifecycle?:
 
   function build(forStore: StateStore): WorkflowEngine {
     const subagents: SubagentHost = {
-      async ensureRoleActor(run, roleKey, initialText) {
-        spawns.push({ label: `role:${roleKey}`, agentOptions: routeToAgentOptions(resolveRoleModel(run, roleKey, run.delegationRoute)), text: initialText })
+      async ensureRoleActor(run, roleKey, initialText, model) {
+        spawns.push({ label: `role:${roleKey}`, agentOptions: routeToAgentOptions(model ?? resolveRoleModel(run, roleKey, run.delegationRoute)), text: initialText })
         const childId = `child-${++serial}`
         lifecycle?.noteStart(childId, `epoch-${childId}`)
         return { childId, messageId: `message-${serial}` }
       },
       async startJudge(run: RunState, input: JudgeSpawnInput) {
-        spawns.push({ label: 'judge', agentOptions: routeToAgentOptions(judgeSpawnPlan(run, run.delegationRoute).agentOptions) })
+        spawns.push({ label: 'judge', agentOptions: routeToAgentOptions(input.model ?? judgeSpawnPlan(run, run.delegationRoute).agentOptions) })
         return { judgeSessionId: input.judgeSessionId, messageId: `message-${++serial}` }
       },
-      async followupJudge() { return { messageId: `message-${++serial}` } },
+      async followupJudge(_run, _session, input) { spawns.push({ label: 'judge', agentOptions: routeToAgentOptions(input.model!) }); return { messageId: `message-${++serial}` } },
       async judgeSessionAvailability() { return 'available' as const },
       async roleSessionAvailability() { return 'available' as const },
       async retireJudge() {},
@@ -238,7 +332,7 @@ function harness(config: WorkflowConfig = CONFIG, traceDir?: string, lifecycle?:
     }
     const engine = new WorkflowEngine({
       async steerManager(_run, text) { messages.push(text); return { messageId: 'manager-message' } },
-      async sendRoleActor(_run, roleKey, text) { spawns.push({ label: `send:${roleKey}`, text }); return { messageId: `message-${++serial}` } },
+      async sendRoleActor(_run, roleKey, text, model) { spawns.push({ label: `send:${roleKey}`, text, ...(model ? { agentOptions: routeToAgentOptions(model) } : {}) }); return { messageId: `message-${++serial}` } },
       managerSessionSeq() { return 0 },
     }, subagents, { async run() { throw new Error('no programs') } }, makeStateHost(forStore))
     engine.cwdResolver = async () => 'cwd'
@@ -307,7 +401,7 @@ function harness(config: WorkflowConfig = CONFIG, traceDir?: string, lifecycle?:
 }
 
 function lastRoleSpawn(spawns: Spawn[]): Spawn {
-  const spawn = spawns.filter(entry => entry.label === 'role:worker').at(-1)
+  const spawn = spawns.filter(entry => entry.label === 'role:worker' || entry.label === 'send:worker').at(-1)
   assert.ok(spawn, 'role:worker spawn expected')
   return spawn
 }
@@ -327,11 +421,11 @@ test('#235 5xx 且已安全收口：自动切备用并重派，Manager 收到通
     assert.equal(row.execution.nodeId, 'work')
     assert.equal(row.execution.blockReason, null)
     assert.deepEqual(row.run.roleRoutes, { worker: { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 } })
-    assert.notEqual(row.run.roleActors.worker, failedSession, '旧路由会话不再被复用')
+    assert.equal(row.run.roleActors.worker, failedSession, '#287 路由更新保留同一 Session')
 
     const respawn = h.spawns.slice(before)
     assert.equal(respawn.length, 1, '只重新派发一次')
-    assert.equal(respawn[0]!.label, 'role:worker')
+    assert.equal(respawn[0]!.label, 'send:worker')
     assert.equal(respawn[0]!.agentOptions?.provider, 'backup')
     assert.equal(respawn[0]!.agentOptions?.model, 'backup-model')
     assert.equal(respawn[0]!.agentOptions?.reasoningEffort, undefined, '省略档位 = 备用模型默认档位')
@@ -379,7 +473,7 @@ test('#247 同装 lifecycle + fallback：生命周期信号与安全收口正反
     assert.equal(row.run.roleRoutes.worker!.autoSwitches, 1, '不双扣预算')
     assert.equal(h.spawns.length, spawnsBefore + 1, '不因旧信号再派发')
     const newSession = row.execution.dispatch!.sessionId!
-    assert.notEqual(newSession, primarySession)
+    assert.equal(newSession, primarySession)
     assert.equal((await h.store.events('ws', row.execution.executionId)).filter(event => event.type === 'blocked').length, 0)
     // 正序：新派发受理后先接受 claim，再收到生命周期终态；阶段已离开 working，
     // 终态不得撤 claim、不得改派、不得把安全收口变成技术 BLOCK。
@@ -422,7 +516,7 @@ test('#235 已执行外部写后故障：材料保留事实，新执行先核验
     const row = await h.row()
     assert.equal(row.run.status, 'running', '合格故障 + 安全收口 → 切换而不是 BLOCK')
     const dispatch = h.spawns.slice(spawnsBefore).at(-1)!
-    assert.equal(dispatch.label, 'role:worker')
+    assert.equal(dispatch.label, 'send:worker')
     const text = dispatch.text!
     // 恢复材料保留事实：节点原始材料仍在派发正文里。
     assert.ok(text.includes(materials), '节点材料原样保留')
@@ -524,48 +618,27 @@ test('#235 无备用路由的角色完全保持旧行为', async () => {
   } finally { h.close() }
 })
 
-test('#235 Manager 显式设置模型开新一轮：C → 主模型 → 备用 → BLOCK', async () => {
+test('#287 Manager 显式设置当前主模型：C → 保留的备用 → BLOCK，不回冻结 A', async () => {
   const h = harness()
   try {
     await h.start()
     const worker = await h.toWorker()
     await h.engine.handleTurnEnded('ws', worker, QUOTA_402.text, QUOTA_402.facts)
-
-    // C 可与主/备用相同：先钉住「相同也接受」，再走真正的 C。
     assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'primary', 'primary-model', 'manager')).ok, true)
-    let row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
+    assert.equal((await h.row()).run.roleRoutes?.worker?.stage, 'primary')
     assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'manual', 'manual-model', 'manager')).ok, true)
-    row = await h.row()
-    assert.deepEqual(row.run.modelOverrides.worker, { provider: 'manual', modelId: 'manual-model' })
-
-    const token = row.execution.nodeToken
-    assert.equal((await h.engine.handleResume('ws', token, '换模型后继续', 'manager', 'actor')).ok, true)
+    const configured = await h.row()
+    assert.equal((await h.engine.handleResume('ws', configured.execution.nodeToken, '换模型后继续', 'manager', 'actor')).ok, true)
     assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'manual')
-
-    // C 合格故障 → 回主模型 A（预算 1）。
-    const manual = await h.caller()
-    await h.engine.handleTurnEnded('ws', manual, FAILOVER_503.text, FAILOVER_503.facts)
-    row = await h.row()
-    assert.equal(row.run.status, 'running')
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-    assert.equal(row.run.modelOverrides.worker, undefined, '离开人工轮即清 override')
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'primary')
-
-    // 主模型 A 再合格故障 → 升备用 B（预算 2）。
-    const backOnPrimary = await h.caller()
-    await h.engine.handleTurnEnded('ws', backOnPrimary, FAILOVER_503.text, FAILOVER_503.facts)
-    row = await h.row()
-    assert.equal(row.run.status, 'running')
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 })
+    await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
+    const backup = await h.row()
+    assert.equal(backup.run.status, 'running')
+    assert.deepEqual(backup.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
+    assert.equal(backup.run.roleModelConfigs?.worker.primary.modelId, 'manual-model')
     assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'backup')
-
-    // 备用 B 再失败 → BLOCK（链终点）。
-    const onBackup = await h.caller()
-    await h.engine.handleTurnEnded('ws', onBackup, FAILOVER_503.text, FAILOVER_503.facts)
-    row = await h.row()
-    assert.equal(row.run.status, 'blocked')
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 })
+    await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
+    assert.equal((await h.row()).run.status, 'blocked')
+    assert.equal((await h.row()).run.roleRoutes?.worker?.autoSwitches, 1)
   } finally { h.close() }
 })
 
@@ -624,7 +697,7 @@ test('#236 配置 Judge 备用：判定中 5xx 直接切 B 判同一 claim，不
     assert.equal(row.execution.input, before.execution.input)
     assert.equal(row.execution.judge!.claimId, claimId)
     assert.equal(row.execution.judge!.inputVersion, inputVersion)
-    assert.notEqual(row.execution.judge!.sessionId, oldJudgeSession, '旧会话仅撤权，新会话判同一 claim')
+    assert.equal(row.execution.judge!.sessionId, oldJudgeSession, '#287 同会话按新派发判同一 claim')
     assert.deepEqual(row.execution.judge!.model, { provider: 'jbackup', modelId: 'jbackup-model' })
 
     const respawn = judgeSpawns(h.spawns, spawnsBefore)
@@ -892,7 +965,7 @@ test('#236 编辑器：Judge 备用模型设置/清除/撤销，保存-重载业
   assert.equal(previewDraft(session).problems.length, 0)
 })
 
-// ---- #237：人工换模授权的新恢复轮次（C → A → B → BLOCK） ----
+// ---- #237 回归按 #287 更新：主动设模重开当前主备轮次（C → B → BLOCK） ----
 
 /** plan(manager) → work(worker) → work2(worker)：验证人工 C 成功后跨节点保持。 */
 const CHAIN_CONFIG = load(`
@@ -950,211 +1023,172 @@ function routesOf(status: unknown): Array<Record<string, unknown>> {
   return (status as { status: { routes: Array<Record<string, unknown>> } }).status.routes
 }
 
-test('#237 Actor 人工换模：C→A→B→BLOCK，失败设置不授予预算，再次设置才重置', async () => {
+test('#237 Actor 人工换模：C→B→BLOCK，失败设置不授予预算，再次设置才重置（#287）', async () => {
   const h = harness()
   try {
     await h.start()
-    // C=A：与主路由相同也承认这次授权（不因路由值相同静默丢轮次）。
+    // C=A 同样保存当前 Run 主模型，不再插入一次冻结 A 重试。
     assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'primary', 'primary-model', 'manager')).ok, true)
     let row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
     const worker = await h.toWorker()
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'primary', 'C=A 先派发 A')
-
-    // C（=A）合格故障 → 原始 A 阶段（预算 1）：授权被推进，不是被静默丢弃。
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'primary')
     await h.engine.handleTurnEnded('ws', worker, FAILOVER_503.text, FAILOVER_503.facts)
     row = await h.row()
     assert.equal(row.run.status, 'running')
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-    assert.equal(row.run.modelOverrides.worker, undefined, '离开人工阶段即撤销 C')
+    assert.equal(row.execution.dispatch!.sessionId, worker.sessionId, '切备保留 durable Session')
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'backup')
 
-    // 关库重开：阶段与预算来自持久化行（重启不刷新授权）。
     h.reopen()
     row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-
-    // A 合格故障 → 原始 B（预算 2）→ B 终止失败只 BLOCK。
-    await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
-    row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 })
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'backup')
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
     const blockedAt = h.spawns.length
     await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
     row = await h.row()
     assert.equal(row.run.status, 'blocked')
     assert.equal(h.spawns.length, blockedAt, 'B 失败不自动回 A/C，也不追加派发')
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 })
 
-    // 失败的人工设置不授予新预算（非法路由 / 非 Manager 都先被拒绝）。
+    // 非法路由 / 非 Manager 设置不部分修改配置、预算或历史。
+    const beforeInvalid = structuredClone(row)
     assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', '', '', 'manager')).ok, false)
     assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'manual', 'manual-model', 'not-manager')).ok, false)
-    row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 }, '失败设置不刷新预算')
+    assert.deepEqual(await h.row(), beforeInvalid)
 
-    // 再次成功的设置才开新一轮；C=B 与备用相同也授权，resume 后先重试 B。
+    // C=B 也开新轮；当前主备相同，不凭空回原冻结 A 或重复派 B。
     assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'backup', 'backup-model', 'manager')).ok, true)
     row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
+    assert.equal(row.run.roleModelConfigs?.worker.revision, 2)
     assert.equal((await h.engine.handleResume('ws', row.execution.nodeToken, '换回备用模型再试', 'manager', 'actor')).ok, true)
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'backup')
-    // C(=B) 合格故障 → A；A 失败 → B；B 失败 → BLOCK（一次 Turn 不要求走完整链）。
-    await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
-    row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'primary')
-    await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
-    row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 })
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'backup')
     const blockedAgain = h.spawns.length
     await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
     row = await h.row()
     assert.equal(row.run.status, 'blocked')
     assert.equal(h.spawns.length, blockedAgain)
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 })
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
   } finally { h.close() }
 })
 
-test('#237 Actor 人工 C 成功后跨节点继续用 C，之后合格故障才推进到 A', async () => {
+test('#237 Actor 人工 C 成功后跨节点继续用 C，之后合格故障才切 B（#287）', async () => {
   const h = harness(CHAIN_CONFIG)
   try {
     await h.start()
     assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'manual', 'manual-model', 'manager')).ok, true)
     await h.toWorker()
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'manual', 'C 生效')
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'manual', 'C 生效')
 
     // C 正常 → 节点推进到 work2 仍用 C（不因一次成功回 A，也不结束人工轮）。
     await acceptNode(h)
     let row = await h.row()
     assert.equal(row.execution.nodeId, 'work2')
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'manual', '跨节点保持 C')
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'manual', '跨节点保持 C')
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
     assert.deepEqual(routesOf(await h.engine.status('ws', 'manager')), [{
-      role: 'worker', stage: 'manual', route: 'manual/manual-model', fallback: 'backup/backup-model',
+      role: 'worker', stage: 'primary', route: 'manual/manual-model', fallback: 'backup/backup-model',
       reason: 'manager-set', autoSwitches: 0,
     }], '人工阶段在状态里可解释')
 
     // 重开：人工阶段与 override 来自持久化行。
     h.reopen()
     row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
     assert.deepEqual(row.run.modelOverrides.worker, { provider: 'manual', modelId: 'manual-model' })
 
-    // work2 上 C 合格故障 → 原始 A（冻结主路由），阶段与预算按本轮继续。
+    // work2 上当前主模型 C 合格故障 → 保留的备用 B。
     await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
     row = await h.row()
     assert.equal(row.execution.nodeId, 'work2')
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'primary')
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'backup')
   } finally { h.close() }
 })
 
-test('#237 Judge 人工换模：C→A→B→BLOCK，重开不刷新，B 失败不再自动重试', async () => {
+test('#237 Judge 人工换模：C→B→BLOCK，重开不刷新，B 失败不再自动重试（#287）', async () => {
   const h = harness(judgeConfig())
   try {
     await h.start()
     assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'jmanual', 'jmanual-model', 'manager')).ok, true)
     let row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
-    assert.deepEqual(row.run.modelOverrides.judge, { provider: 'jmanual', modelId: 'jmanual-model' })
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
     assert.deepEqual(routesOf(await h.engine.status('ws', 'manager')), [{
-      role: 'judge', stage: 'manual', route: 'jmanual/jmanual-model', fallback: 'jbackup/jbackup-model',
+      role: 'judge', stage: 'primary', route: 'jmanual/jmanual-model', fallback: 'jbackup/jbackup-model',
       reason: 'manager-set', autoSwitches: 0,
-    }], 'Judge 人工阶段可见且来源可解释')
-
-    const spawnsBefore = h.spawns.length
+    }])
     const judging = await h.toChecking()
-    assert.equal(judgeSpawns(h.spawns, spawnsBefore)[0]!.agentOptions?.provider, 'jmanual', 'C 生效')
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'jmanual')
     const claimId = (await h.row()).execution.claim!.id
-
-    // C 合格故障 → 原始 A（jprimary），判同一 claim。
     await h.engine.handleTurnEnded('ws', judging, FAILOVER_503.text, FAILOVER_503.facts)
     row = await h.row()
     assert.equal(row.run.status, 'running')
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-    assert.equal(row.run.modelOverrides.judge, undefined, '离开人工阶段即撤销 C')
-    assert.deepEqual(row.execution.judge!.model, { provider: 'jprimary', modelId: 'jprimary-model' })
-    assert.equal(row.execution.claim!.id, claimId)
-
-    // 重开：A 阶段与预算 1 持久化。
-    h.reopen()
-    row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-
-    // A 合格故障 → 原始 B（预算 2）。
-    await h.engine.handleTurnEnded('ws', await judgeCaller(h), FAILOVER_503.text, FAILOVER_503.facts)
-    row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 })
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
+    assert.deepEqual(row.run.roleModelConfigs?.judge.primary, { provider: 'jmanual', modelId: 'jmanual-model' })
     assert.deepEqual(row.execution.judge!.model, { provider: 'jbackup', modelId: 'jbackup-model' })
-    const staleJudge = row.execution.judge!.sessionId
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'jbackup')
+    assert.equal(row.execution.judge!.sessionId, judging.sessionId, '切备仍判同一 Session 中的同一 claim')
+    assert.equal(row.execution.claim!.id, claimId)
+    const staleJudge = await judgeCaller(h)
 
-    // 重开后 B 再失败 → BLOCK，不追加插件级重试、不回到 A/C。
     h.reopen()
+    assert.deepEqual((await h.row()).run.roleRoutes?.judge, row.run.roleRoutes?.judge)
     const spawnsBeforeBlock = h.spawns.length
     await h.engine.handleTurnEnded('ws', await judgeCaller(h), FAILOVER_503.text, FAILOVER_503.facts)
     row = await h.row()
     assert.equal(row.run.status, 'blocked')
     assert.match(row.execution.blockReason!, /judge turn ended without judge_claim \(备用模型已用尽，不再自动重试\)/)
     assert.equal(h.spawns.length, spawnsBeforeBlock)
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 })
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
 
-    // 再次成功的人工设置（即使与上次相同的值）才开新一轮：预算归零、重新授权 C。
     const reset = await h.engine.handleSetRoleModel('ws', 'judge', 'jmanual', 'jmanual-model', 'manager')
     assert.equal(reset.ok, true)
-    assert.equal(reset.message, 'model override saved for judge')
+    assert.equal(reset.message, 'next dispatch primary saved for judge')
     row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
-    assert.deepEqual(row.run.modelOverrides.judge, { provider: 'jmanual', modelId: 'jmanual-model' })
-    // 已在人工阶段时重复同值设置是无需变更的 no-op（不重复扣预算，也不重复派发）。
-    const again = await h.engine.handleSetRoleModel('ws', 'judge', 'jmanual', 'jmanual-model', 'manager')
-    assert.equal(again.message, 'model override already applied')
-
-    // resume 后按新轮次先走 C（跨过已用尽的 B 阶段）；旧轮次的迟到 Turn 不覆盖新轮次。
+    assert.equal(row.run.roleModelConfigs?.judge.revision, 2)
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
+    // 每次同值保存仍开独立轮次，但保存本身不重派或解除 BLOCK。
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'jmanual', 'jmanual-model', 'manager')).ok, true)
+    assert.equal((await h.row()).run.roleModelConfigs?.judge.revision, 3)
+    assert.equal((await h.row()).run.status, 'blocked')
+    assert.equal(h.spawns.length, spawnsBeforeBlock)
     assert.equal((await h.engine.handleResume('ws', row.execution.nodeToken, '人工换新模型后重判', 'manager', 'judge')).ok, true)
     row = await h.row()
-    assert.equal(row.run.status, 'running')
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'jmanual', '显式 Judge resume 的新判定使用当前主模型')
     assert.deepEqual(row.execution.judge!.model, { provider: 'jmanual', modelId: 'jmanual-model' })
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
-    await h.engine.handleTurnEnded('ws', { sessionId: staleJudge!, turnUserMessageIds: new Set(['stale-turn']) }, FAILOVER_503.text, FAILOVER_503.facts)
+    const resumed = structuredClone(row.execution)
+    await h.engine.handleTurnEnded('ws', staleJudge, FAILOVER_503.text, FAILOVER_503.facts)
     row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 }, '旧会话迟到 Turn 不消耗新轮次预算')
-    assert.equal(row.execution.phase, 'checking')
+    assert.deepEqual(row.execution, resumed, '旧派发迟到 Turn 不覆盖新轮次')
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
   } finally { h.close() }
 })
 
-test('#237 Judge 人工换模：C=A、C=B 仍各开一轮完整轮次', async () => {
+test('#237 Judge 人工换模：C=A、C=B 仍各开独立轮次（#287）', async () => {
   const h = harness(judgeConfig())
   try {
     await h.start()
-    // C=A：与主路由相同也授权 manual 阶段。
     assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'jprimary', 'jprimary-model', 'manager')).ok, true)
-    const spawnsBefore = h.spawns.length
     const judging = await h.toChecking()
-    assert.equal(judgeSpawns(h.spawns, spawnsBefore)[0]!.agentOptions?.provider, 'jprimary')
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'jprimary')
     await h.engine.handleTurnEnded('ws', judging, FAILOVER_503.text, FAILOVER_503.facts)
     let row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 }, 'C=A 的合格故障推进到 A 阶段')
-    await h.engine.handleTurnEnded('ws', await judgeCaller(h), FAILOVER_503.text, FAILOVER_503.facts)
-    row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 })
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 }, 'C=A 失败直接切 B，不重复 A')
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'jbackup')
     await h.engine.handleTurnEnded('ws', await judgeCaller(h), FAILOVER_503.text, FAILOVER_503.facts)
     assert.equal((await h.row()).run.status, 'blocked')
 
-    // C=B：与备用相同也开新一轮（预算归零）；resume 后从 B 开始，不走 A。
     assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'jbackup', 'jbackup-model', 'manager')).ok, true)
     row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
+    assert.equal(row.run.roleModelConfigs?.judge.revision, 2)
     assert.equal((await h.engine.handleResume('ws', row.execution.nodeToken, '人工指定备用模型再判', 'manager', 'judge')).ok, true)
-    row = await h.row()
-    assert.deepEqual(row.execution.judge!.model, { provider: 'jbackup', modelId: 'jbackup-model' })
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'jbackup')
+    const beforeFailure = h.spawns.length
     await h.engine.handleTurnEnded('ws', await judgeCaller(h), FAILOVER_503.text, FAILOVER_503.facts)
     row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 }, 'C=B 的合格故障回到原始 A')
-    assert.deepEqual(row.execution.judge!.model, { provider: 'jprimary', modelId: 'jprimary-model' })
-    await h.engine.handleTurnEnded('ws', await judgeCaller(h), FAILOVER_503.text, FAILOVER_503.facts)
-    row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 })
-    await h.engine.handleTurnEnded('ws', await judgeCaller(h), FAILOVER_503.text, FAILOVER_503.facts)
-    assert.equal((await h.row()).run.status, 'blocked')
+    assert.equal(row.run.status, 'blocked', '主备同路由时不自动回冻结 A 或再次派 B')
+    assert.equal(h.spawns.length, beforeFailure)
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
   } finally { h.close() }
 })
 
@@ -1167,17 +1201,17 @@ test('#237 人工轮中不合格故障不换模：额度耗尽 BLOCK，恢复后
     let row = await h.row()
     assert.equal(row.run.status, 'blocked')
     assert.match(row.execution.blockReason!, /code=QUOTA status=402/)
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 }, '不合格故障不推进阶段、不消耗预算')
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 }, '不合格故障不推进阶段、不消耗预算')
     assert.equal(row.execution.judgeAutoRetried, undefined)
     assert.equal(h.messages.filter(message => message.includes('Workflow MODEL FALLBACK')).length, 0)
 
-    // Manager 显式恢复不是新的换模授权，但也不刷新/跳过人工阶段；后续合格故障才 → A。
+    // Manager 显式恢复不刷新轮次；后续合格故障才切当前备用 B。
     assert.equal((await h.engine.handleResume('ws', row.execution.nodeToken, '额度已恢复，继续判定', 'manager', 'judge')).ok, true)
     row = await h.row()
     assert.deepEqual(row.execution.judge!.model, { provider: 'jmanual', modelId: 'jmanual-model' })
     await h.engine.handleTurnEnded('ws', await judgeCaller(h), FAILOVER_503.text, FAILOVER_503.facts)
     row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
   } finally { h.close() }
 })
 
@@ -1201,12 +1235,12 @@ test('#237 Judge 人工 C 成功后跨节点继续用 C（判定成功不结束�
     await h.toChecking()
     assert.equal(judgeSpawns(h.spawns, workSpawnsBefore)[0]!.agentOptions?.provider, 'jmanual', '跨节点保持 C')
     const workRow = await h.row()
-    assert.deepEqual(workRow.run.roleRoutes?.judge, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
+    assert.deepEqual(workRow.run.roleRoutes?.judge, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
     assert.deepEqual(workRow.execution.judge!.model, { provider: 'jmanual', modelId: 'jmanual-model' })
   } finally { h.close() }
 })
 
-test('#237 再次人工设置（即使值相同）重置轮次：C→A 后重设 C，再失败仍回 A 不直接 B', async () => {
+test('#237 再次人工设置（即使值相同）重置轮次：旧 B 失败先派 C，不扣新预算（#287）', async () => {
   const h = harness()
   try {
     await h.start()
@@ -1214,32 +1248,29 @@ test('#237 再次人工设置（即使值相同）重置轮次：C→A 后重设
     await h.toWorker()
     await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
     let row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-    assert.ok(!h.messages.some(message => message.includes('model override already applied')))
-
-    // 活动派发中的人工替换仍受既有安全约束：先 BLOCK 才能换模（本测试用不合格故障收口）。
-    const blocked = await h.engine.handleSetRoleModel('ws', 'worker', 'manual', 'manual-model', 'manager')
-    assert.equal(blocked.ok, false)
-    await h.engine.handleTurnEnded('ws', await h.caller(), QUOTA_402.text, QUOTA_402.facts)
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
+    const oldBackup = await h.caller()
+    const oldDispatch = structuredClone(row.execution.dispatch)
+    const beforeSave = h.spawns.length
+    // 活动派发可保存同值主模型；旧登记事实不变，保存不隐式重派。
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'manual', 'manual-model', 'manager')).ok, true)
+    row = await h.row()
+    assert.equal(row.run.roleModelConfigs?.worker.revision, 2)
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
+    assert.deepEqual(row.execution.dispatch, oldDispatch)
+    assert.equal(h.spawns.length, beforeSave)
+    await h.engine.handleTurnEnded('ws', oldBackup, FAILOVER_503.text, FAILOVER_503.facts)
+    row = await h.row()
+    assert.equal(row.execution.dispatch!.sessionId, oldBackup.sessionId)
+    assert.equal(row.execution.dispatch!.model?.provider, 'manual')
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'manual')
+    assert.equal(row.run.roleRoutes?.worker.autoSwitches, 0, '旧 B 失败不消耗新 C 的备用机会')
+    await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
+    row = await h.row()
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'backup')
+    await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
     assert.equal((await h.row()).run.status, 'blocked')
-
-    // 与上次完全相同的 C：已不在人工阶段，不得走 no-op——必须重新授权（预算归零）。
-    const again = await h.engine.handleSetRoleModel('ws', 'worker', 'manual', 'manual-model', 'manager')
-    assert.equal(again.ok, true)
-    assert.equal(again.message, 'model override saved for worker')
-    row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
-
-    assert.equal((await h.engine.handleResume('ws', row.execution.nodeToken, '同一模型再试一轮', 'manager', 'actor')).ok, true)
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'manual')
-    // 新轮次里 C 失败回到原始 A——而不是沿用上一轮已消耗的预算直接升 B。
-    await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
-    row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'primary', '重设后的新一轮仍是 C→A，不是 C→B')
-    await h.engine.handleTurnEnded('ws', await h.caller(), FAILOVER_503.text, FAILOVER_503.facts)
-    row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 2 })
   } finally { h.close() }
 })
 
@@ -1295,76 +1326,65 @@ function dualConfig(): WorkflowConfig {
   return config
 }
 
-test('#243 R1 在途判定期间人工设 C：C 未实派，通知/trace 归因写中性标注而非 C', async () => {
+test('#243 R1 在途判定期间人工设 C：旧 A 失败归因实际 A，先派 C 不扣预算（#287）', async () => {
   const traceDir = mkdtempSync(join(tmpdir(), 'workflow-role-fallback-trace-'))
   const h = harness(judgeConfig(), traceDir)
   try {
     await h.start()
     const judging = await h.toChecking()
     const before = await h.row()
-    const dispatched = before.execution.judge!.model
-    assert.deepEqual(dispatched, { provider: 'jprimary', modelId: 'jprimary-model' }, '在途判定实际走主模型')
-
-    // 人工设 C：判定已派发未结算 → 恒无会话映射，设置成功但只从下一次判定生效。
+    const dispatched = structuredClone(before.execution.judge!)
+    assert.deepEqual(dispatched.model, { provider: 'jprimary', modelId: 'jprimary-model' })
     assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'manual', 'manual-model', 'manager')).ok, true)
     const arranged = await h.row()
-    assert.deepEqual(arranged.run.roleRoutes?.judge, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
-    assert.deepEqual(arranged.execution.judge!.model, dispatched, '设置不重派、不替换在途判定')
+    assert.deepEqual(arranged.run.roleRoutes?.judge, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
+    assert.deepEqual(arranged.execution.judge, dispatched, '保存不重写在途模型及 configRevision')
 
-    // 在途判定以合格故障终局：失败发生在那次真实派发的路由上，C 从未运行。
     await h.engine.handleTurnEnded('ws', judging, FAILOVER_503.text, FAILOVER_503.facts)
     const row = await h.row()
     assert.equal(row.run.status, 'running')
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-    assert.equal(row.run.modelOverrides.judge, undefined, '离开人工阶段即撤销 C')
-    assert.deepEqual(row.execution.judge!.model, { provider: 'jprimary', modelId: 'jprimary-model' })
-
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 0 })
+    assert.deepEqual(row.run.roleModelConfigs?.judge.primary, { provider: 'manual', modelId: 'manual-model' })
+    assert.deepEqual(row.execution.judge!.model, { provider: 'manual', modelId: 'manual-model' })
+    assert.equal(row.execution.judge!.sessionId, judging.sessionId)
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'manual')
     const notices = h.messages.filter(message => message.includes('Workflow MODEL FALLBACK'))
     assert.equal(notices.length, 1)
-    assert.match(notices[0]!, /role=judge 人工路由未实派 → jprimary\/jprimary-model（primary，本轮第 1 次自动切换，原因 server-5xx code=SERVER status=503）/)
-    assert.doesNotMatch(notices[0]!, /manual\/manual-model →/, '不得把从未运行的 C 写成来源')
-    // trace 与通知同源：同一个 from 值，不存在「通知说 C、trace 说 A」的分叉。
-    assert.match(h.trace(), /MODEL-FALLBACK .*role=judge from="人工路由未实派" to="jprimary\/jprimary-model" stage=primary switch=1/)
+    assert.match(notices[0]!, /role=judge jprimary\/jprimary-model → manual\/manual-model（primary，本轮第 0 次自动切换，原因 server-5xx code=SERVER status=503）/)
+    assert.doesNotMatch(notices[0]!, /manual\/manual-model →|人工路由未实派/, '来源取登记的实际 A，不用最新 C 或中性占位')
+    assert.match(h.trace(), /MODEL-FALLBACK .*role=judge from="jprimary\/jprimary-model" to="manual\/manual-model" stage=primary switch=0/)
     assert.doesNotMatch(h.trace(), /MODEL-FALLBACK .*from="manual\/manual-model"/)
   } finally { h.close(); rmSync(traceDir, { recursive: true, force: true }) }
 })
 
-test('#243 MF-1 在途判定期间人工设同模型异档位 C：C 未实派，from 不得写成含 effort 的 C 标签', async () => {
+test('#243 MF-1 在途判定期间人工设同模型异档位 C：from 不得写成含 effort 的 C 标签（#287）', async () => {
   const traceDir = mkdtempSync(join(tmpdir(), 'workflow-role-fallback-trace-'))
   const h = harness(judgeConfig(), traceDir)
   try {
     await h.start()
     const judging = await h.toChecking()
-    const dispatched = (await h.row()).execution.judge!.model
-    assert.deepEqual(dispatched, { provider: 'jprimary', modelId: 'jprimary-model' }, '在途判定实际走主模型（无显式档位）')
-
-    // 人工设 C：与在途派发同 provider+modelId、仅档位不同。#237 允许并开新一轮，
-    // 但判定已派发未结算 → C 只从下一次判定生效，本次从未实派。
+    const dispatched = structuredClone((await h.row()).execution.judge!)
+    assert.deepEqual(dispatched.model, { provider: 'jprimary', modelId: 'jprimary-model' })
     assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'jprimary', 'jprimary-model', 'manager', 'high')).ok, true)
-    const arranged = await h.row()
-    assert.deepEqual(arranged.run.modelOverrides.judge, { provider: 'jprimary', modelId: 'jprimary-model', reasoningEffort: 'high' })
-    assert.deepEqual(arranged.execution.judge!.model, dispatched, '设置不重派、不替换在途判定')
-
+    assert.deepEqual((await h.row()).execution.judge, dispatched, '保存不重写旧登记事实')
     const spawnsBefore = h.spawns.length
     await h.engine.handleTurnEnded('ws', judging, FAILOVER_503.text, FAILOVER_503.facts)
     const row = await h.row()
     assert.equal(row.run.status, 'running')
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-    assert.equal(row.run.modelOverrides.judge, undefined, '离开人工阶段即撤销 C')
-
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 0 })
+    assert.deepEqual(row.execution.judge!.model, { provider: 'jprimary', modelId: 'jprimary-model', reasoningEffort: 'high' })
     const notices = h.messages.filter(message => message.includes('Workflow MODEL FALLBACK'))
     assert.equal(notices.length, 1)
-    assert.match(notices[0]!, /role=judge 人工路由未实派 → jprimary\/jprimary-model（primary，本轮第 1 次自动切换，原因 server-5xx code=SERVER status=503）/)
-    assert.doesNotMatch(notices[0]!, /jprimary\/jprimary-model\/high →/, '同 provider+modelId 异档位也是另一条未实派的路由，不得写成来源')
-    // trace 与通知同源：同一个中性标注，不存在「通知说中性、trace 说 C」的分叉。
-    assert.match(h.trace(), /MODEL-FALLBACK .*role=judge from="人工路由未实派" to="jprimary\/jprimary-model" stage=primary switch=1/)
+    assert.match(notices[0]!, /role=judge jprimary\/jprimary-model → jprimary\/jprimary-model\/high（primary，本轮第 0 次自动切换/)
+    assert.doesNotMatch(notices[0]!, /jprimary\/jprimary-model\/high →/, '旧失败来源不继承最新 effort')
+    assert.match(h.trace(), /MODEL-FALLBACK .*role=judge from="jprimary\/jprimary-model" to="jprimary\/jprimary-model\/high" stage=primary switch=0/)
     assert.doesNotMatch(h.trace(), /MODEL-FALLBACK .*from="jprimary\/jprimary-model\/high"/)
-
     const respawn = judgeSpawns(h.spawns, spawnsBefore)
-    assert.equal(respawn.length, 1, '只重派一次')
+    assert.equal(respawn.length, 1)
     assert.equal(respawn[0]!.agentOptions?.provider, 'jprimary')
     assert.equal(respawn[0]!.agentOptions?.model, 'jprimary-model')
-    assert.equal(respawn[0]!.agentOptions?.reasoningEffort, undefined, 'C 已撤销：重派走主模型默认档位')
+    assert.equal(respawn[0]!.agentOptions?.reasoningEffort, 'high', '新登记 C 实际应用新 effort')
+    assert.equal(row.execution.judge!.sessionId, judging.sessionId)
   } finally { h.close(); rmSync(traceDir, { recursive: true, force: true }) }
 })
 
@@ -1377,12 +1397,12 @@ test('#243 MF-1 反向锁：C 真的实派时 from 就是带 effort 的 C 标签
     const spawnsBefore = h.spawns.length
     await h.engine.handleTurnEnded('ws', await h.toChecking(), FAILOVER_503.text, FAILOVER_503.facts)
     const row = await h.row()
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
     const notices = h.messages.filter(message => message.includes('Workflow MODEL FALLBACK'))
     assert.equal(notices.length, 1)
-    assert.match(notices[0]!, /role=judge jmanual\/jmanual-model\/high → jprimary\/jprimary-model（primary，本轮第 1 次自动切换/)
+    assert.match(notices[0]!, /role=judge jmanual\/jmanual-model\/high → jbackup\/jbackup-model（fallback，本轮第 1 次自动切换/)
     assert.doesNotMatch(notices[0]!, /人工路由未实派/, 'C 实派时不得退化成中性标注')
-    assert.equal(judgeSpawns(h.spawns, spawnsBefore).at(-1)!.agentOptions?.provider, 'jprimary')
+    assert.equal(judgeSpawns(h.spawns, spawnsBefore).at(-1)!.agentOptions?.provider, 'jbackup')
   } finally { h.close() }
 })
 
@@ -1394,46 +1414,55 @@ test('#243 MF-1 sameRouteIdentity 三元件全等：缺席键 ≠ 显式键', ()
   assert.equal(sameRouteIdentity(undefined, { provider: 'p', modelId: 'm' }), false)
 })
 
-test('#243 R1 推广：备用阶段运行中人工设 C，C 未实派同样写中性标注（R2 直接用例）', async () => {
+test('#243 R1 推广：备用阶段运行中人工设 C，旧 B 失败归因 B，新 C 不扣预算（#287）', async () => {
   const h = harness(judgeConfig())
   try {
     await h.start()
     await h.engine.handleTurnEnded('ws', await h.toChecking(), FAILOVER_503.text, FAILOVER_503.facts)
     let row = await h.row()
     assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-    // 备用阶段的在途判定 + 人工设 C：Run 未 BLOCK，设置同样必然成功（Judge 无会话映射）。
+    const oldBackup = await judgeCaller(h)
+    const dispatched = structuredClone(row.execution.judge)
     assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'manual', 'manual-model', 'manager')).ok, true)
     row = await h.row()
     assert.equal(row.execution.phase, 'checking')
-
-    await h.engine.handleTurnEnded('ws', await judgeCaller(h), FAILOVER_503.text, FAILOVER_503.facts)
+    assert.deepEqual(row.execution.judge, dispatched)
+    await h.engine.handleTurnEnded('ws', oldBackup, FAILOVER_503.text, FAILOVER_503.facts)
     row = await h.row()
     assert.equal(row.run.status, 'running')
     const notices = h.messages.filter(message => message.includes('Workflow MODEL FALLBACK'))
     assert.equal(notices.length, 2)
-    assert.match(notices[1]!, /role=judge 人工路由未实派 → jprimary\/jprimary-model（primary，本轮第 1 次自动切换/, '人工设置开新一轮：预算从 1 重新计数')
-    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 })
-    assert.deepEqual(row.execution.judge!.model, { provider: 'jprimary', modelId: 'jprimary-model' })
+    assert.match(notices[1]!, /role=judge jbackup\/jbackup-model → manual\/manual-model（primary，本轮第 0 次自动切换/)
+    assert.deepEqual(row.run.roleRoutes?.judge, { stage: 'primary', reason: 'server-5xx code=SERVER status=503', autoSwitches: 0 })
+    assert.deepEqual(row.execution.judge!.model, { provider: 'manual', modelId: 'manual-model' })
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'manual')
+    assert.equal(row.execution.judge!.sessionId, oldBackup.sessionId)
   } finally { h.close() }
 })
 
-test('#243 R1 Actor 侧前提：在途派发不可被人工设置替换，映射与派发身份恒一致', async () => {
+test('#243 R1 Actor 在途保存 C 不替换旧派发，旧有效 claim 仍被接受（#287）', async () => {
   const h = harness()
   try {
     await h.start()
-    await h.toWorker()
+    const worker = await h.toWorker()
+    const before = await h.row()
+    assert.equal(before.run.roleActors.worker, before.execution.dispatch!.sessionId)
+    const spawnsBefore = h.spawns.length
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'manual', 'manual-model', 'manager')).ok, true)
     let row = await h.row()
-    assert.equal(row.run.roleActors.worker, row.execution.dispatch!.sessionId,
-      '映射即本次在途派发的会话：from 只能是真实运行过的路由')
-
-    // 运行中（working）替换当前角色被拒；阻塞后迟到 turn-end 不再进入结算（handleTurnEnded
-    // 只处理 running）。两条守卫共同保证 Actor 侧不会出现「C 未实派却写成来源」。
-    const rejected = await h.engine.handleSetRoleModel('ws', 'worker', 'manual', 'manual-model', 'manager')
-    assert.equal(rejected.ok, false)
-    assert.match((rejected as { reason: string }).reason, /node_block before model replacement/)
+    assert.deepEqual(row.execution, before.execution, '旧派发、模型和 configRevision 均不被保存改写')
+    assert.deepEqual(row.run.roleActors, before.run.roleActors)
+    assert.equal(h.spawns.length, spawnsBefore)
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
+    assert.equal((await h.engine.handleClaim('ws', { result: 'succeeded', handoff: '旧 A 的有效提交' }, worker)).ok, true)
+    const claimed = await h.row()
+    await h.engine.handleTurnEnded('ws', worker, FAILOVER_503.text, FAILOVER_503.facts)
     row = await h.row()
-    assert.equal(row.run.modelOverrides.worker, undefined)
-    assert.equal(row.run.roleRoutes, undefined)
+    assert.equal(row.execution.phase, 'checking')
+    assert.deepEqual(row.execution.claim, claimed.execution.claim, '保存及旧 Turn 故障不撤销已接受的结果')
+    assert.deepEqual(row.execution.dispatch, { ...claimed.execution.dispatch, settled: true }, 'Turn 收口只更新 settled，不改原模型与配置归属')
+    assert.equal(row.run.roleModelConfigs?.worker.primary.modelId, 'manual-model')
+    assert.equal(row.run.roleRoutes?.worker.autoSwitches, 0)
   } finally { h.close() }
 })
 
@@ -1442,7 +1471,7 @@ test('#243 S4 单 Run 内 Role 与 Judge 双故障切换相互独立（预算、
   try {
     await h.start()
     const worker = await h.toWorker()
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'primary')
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'primary')
 
     // ① 角色故障：worker 主模型 5xx → 切备用。
     await h.engine.handleTurnEnded('ws', worker, FAILOVER_503.text, FAILOVER_503.facts)
@@ -1450,7 +1479,7 @@ test('#243 S4 单 Run 内 Role 与 Judge 双故障切换相互独立（预算、
     assert.equal(row.run.status, 'running')
     assert.deepEqual(row.run.roleRoutes, { worker: { stage: 'fallback', reason: 'server-5xx code=SERVER status=503', autoSwitches: 1 } },
       '角色切换不碰 Judge 的预算表')
-    assert.equal(lastRoleSpawn(h.spawns).agentOptions?.provider, 'backup')
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'backup')
     assert.deepEqual(resolveRoleModel(row.run, 'judge', row.run.delegationRoute), { provider: 'jprimary', modelId: 'jprimary-model' },
       '角色切备用不影响 Judge 主路由')
 
@@ -1524,7 +1553,7 @@ test('#274 R1 主→备自动切换：新旧两轮 model/source 都在 execution
   } finally { h.close() }
 })
 
-test('#274 R1 BLOCK 中人工换模：未实派设置不改写已记录轮次，resume 重派按 manual 且旧轮留档', async () => {
+test('#274 R1 BLOCK 中人工换模：未实派设置不改写已记录轮次，resume 重派按当前 primary 且旧轮留档（#287）', async () => {
   const h = harness()
   try {
     await h.start()
@@ -1542,17 +1571,21 @@ test('#274 R1 BLOCK 中人工换模：未实派设置不改写已记录轮次，
     row = await h.row()
     assert.equal(row.execution.dispatch!.id, recorded)
     assert.equal(row.execution.dispatch!.source, 'fallback')
+    assert.equal(row.execution.dispatch!.configRevision, 0, '保存新配置不改写已登记轮次归属')
     assert.deepEqual(row.execution.dispatch!.model, { provider: 'backup', modelId: 'backup-model' })
 
-    // resume 后新一轮实派 C：来源 manual；被覆盖的备用轮留档。
+    // resume 后新一轮实派 C：来源 primary；被覆盖的备用轮留档。
     const token = row.execution.nodeToken
     assert.equal((await h.engine.handleResume('ws', token, '换更强模型重试', 'manager', 'actor')).ok, true)
     row = await h.row()
     assert.equal(row.execution.phase, 'working')
-    assert.equal(row.execution.dispatch!.source, 'manual')
+    assert.equal(row.execution.dispatch!.source, 'primary')
     assert.deepEqual(row.execution.dispatch!.model, { provider: 'manual-co', modelId: 'manual-model' })
+    assert.equal(row.execution.dispatch!.configRevision, 1)
+    assert.equal(h.spawns.at(-1)!.agentOptions?.provider, 'manual-co')
     assert.equal(row.execution.previousDispatch?.id, recorded)
     assert.equal(row.execution.previousDispatch?.source, 'fallback')
+    assert.equal(row.execution.previousDispatch?.configRevision, 0)
   } finally { h.close() }
 })
 
@@ -1585,16 +1618,18 @@ test('#274 R1 Manager 退回后重派：previousDispatch 正是被退回 claim �
   } finally { h.close() }
 })
 
-test('#274 R1 C=A 的人工设置仍按 manual 记录来源（不冒充 primary）', async () => {
+test('#274 R1 C=A 的人工设置按当前 primary 记录来源与独立配置修订（#287）', async () => {
   const h = harness()
   try {
     await h.start()
-    // 与 worker 主模型同值：实派结果与 primary 相同，但来源必须是人工阶段。
+    // 与 worker 主模型同值：仍保存独立配置修订，实派来源是当前 primary。
     assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'primary', 'primary-model', 'manager')).ok, true)
     await h.toWorker()
     const row = await h.row()
-    assert.equal(row.execution.dispatch!.source, 'manual')
+    assert.equal(row.execution.dispatch!.source, 'primary')
     assert.deepEqual(row.execution.dispatch!.model, { provider: 'primary', modelId: 'primary-model' })
-    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'manual', reason: 'manager-set', autoSwitches: 0 })
+    assert.equal(row.execution.dispatch!.configRevision, 1)
+    assert.equal(row.run.roleModelConfigs?.worker.revision, 1)
+    assert.deepEqual(row.run.roleRoutes?.worker, { stage: 'primary', reason: 'manager-set', autoSwitches: 0 })
   } finally { h.close() }
 })

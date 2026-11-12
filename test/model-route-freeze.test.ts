@@ -22,7 +22,7 @@ import { WorkflowEngine, type JudgeSpawnInput, type SubagentHost } from '../src/
 import { makeStateHost, makeSubagentHost, managerRouteOf, type HostAdapters } from '../src/plugin/host.ts'
 import { testParticipants } from './helpers/participants.ts'
 import { judgeSpawnPlan, JUDGE_REQUIRED_TOOLS, resolveRoleModel } from '../src/roles/roles.ts'
-import { agentOptionsToRoute, routeToAgentOptions, type RunState, type SpawnAgentOptions, type WorkflowConfig } from '../src/types.ts'
+import { agentOptionsToRoute, routeToAgentOptions, type DelegationRoute, type RunState, type SpawnAgentOptions, type WorkflowConfig } from '../src/types.ts'
 import { StateStore } from '../src/state/store.ts'
 
 const CONFIG: WorkflowConfig = validateAndNormalize(parseCatalogConfig(`
@@ -70,8 +70,8 @@ interface Spawn {
 function recordingHost(spawns: Spawn[]): SubagentHost & { observeTurnEnd(sessionId: string): void } {
   let serial = 0
   const base = {
-    async ensureRoleActor(run: RunState, roleKey: string, _initialText: string) {
-      spawns.push({ label: `role:${roleKey}`, agentOptions: routeToAgentOptions(resolveRoleModel(run, roleKey, run.delegationRoute)) })
+    async ensureRoleActor(run: RunState, roleKey: string, _initialText: string, model?: DelegationRoute) {
+      spawns.push({ label: `role:${roleKey}`, agentOptions: routeToAgentOptions(model ?? resolveRoleModel(run, roleKey, run.delegationRoute)) })
       return { childId: `child-${++serial}`, messageId: `message-${serial}` }
     },
     async startJudge(run: RunState, input: { judgeSessionId: string }) {
@@ -95,7 +95,7 @@ function recordingHost(spawns: Spawn[]): SubagentHost & { observeTurnEnd(session
 function engineFor(store: StateStore, managers: Map<string, Agent>, spawns: Spawn[]): WorkflowEngine {
   const engine = new WorkflowEngine({
     async steerManager() { return { messageId: 'manager-message' } },
-    async sendRoleActor() { return { messageId: 'role-message' } },
+    async sendRoleActor(_run, roleKey, _text, model) { spawns.push({ label: `send:${roleKey}`, agentOptions: model ? routeToAgentOptions(model) : undefined }); return { messageId: 'role-message' } },
     managerSessionSeq() { return 0 },
   }, recordingHost(spawns), { async run() { throw new Error('no programs') } }, makeStateHost(store))
   engine.cwdResolver = async () => 'cwd'
@@ -388,30 +388,30 @@ test('#153 T4: 换到与 Manager 相同路由：不继承 Manager 显式档位�
     // 后续派发沿 #150 明确恢复默认语义，不重新继承 Manager effort。
     const set = await engine.handleSetRoleModel('ws', 'worker', 'provider-a', 'model-a', 'manager-high')
     assert.equal(set.ok, true)
-    assert.equal(set.message, 'model override saved for worker')
+    assert.equal(set.message, 'next dispatch primary saved for worker')
     const afterSet = (await store.get('ws'))!
     assert.deepEqual(afterSet.run.modelOverrides.worker, { provider: 'provider-a', modelId: 'model-a' })
-    assert.equal(afterSet.run.roleActors.worker, undefined, '旧 high 会话映射已删')
+    assert.equal(afterSet.run.roleActors.worker, oldSession, '#287 保留同一会话及其上下文')
     assert.equal((await engine.handleResume('ws', afterSet.execution.nodeToken, 'Use the cleared route.', 'manager-high', 'actor')).ok, true)
     const replaced = (await store.get('ws'))!
-    assert.notEqual(replaced.run.roleActors.worker, oldSession, '不沿用旧 high 会话')
+    assert.equal(replaced.run.roleActors.worker, oldSession, '换模不制造额外 fresh')
     const redispatched = spawns[spawns.length - 1]!
-    assert.equal(redispatched.label, 'role:worker')
+    assert.equal(redispatched.label, 'send:worker')
     assert.equal('reasoningEffort' in redispatched.agentOptions!, true, '派发带显式清除键')
     assert.equal(resolveChildAgentOptions(parent, asHostRequested(redispatched.agentOptions), 1).reasoningEffort, undefined,
       '与 Manager 同路由也不重新继承 high：后续实际请求回落模型默认')
-    // 同模型再次 set：存活映射仍须退役（仅 override 无 effort 不足以 no-op）。
+    // 同模型再次 set：新开配置轮，但保持同一个 Session，档位仍明确清除。
     const live = (await store.get('ws'))!
     const liveCaller = { sessionId: live.execution.dispatch!.sessionId!, turnUserMessageIds: new Set([live.execution.dispatch!.messageId!]) }
     assert.equal((await engine.handleBlock('ws', live.execution.nodeToken, 'retire the same-model session', liveCaller)).ok, true)
     const again = await engine.handleSetRoleModel('ws', 'worker', 'provider-a', 'model-a', 'manager-high')
     assert.equal(again.ok, true)
-    assert.equal(again.message, 'model override saved for worker')
-    assert.equal((await store.get('ws'))!.run.roleActors.worker, undefined, 'T4: 同模型 set 有存活映射时仍退役')
+    assert.equal(again.message, 'next dispatch primary saved for worker')
+    assert.equal((await store.get('ws'))!.run.roleActors.worker, oldSession, '#287 同值设置也不退役会话')
     const blockedAgain = (await store.get('ws'))!
     assert.equal((await engine.handleResume('ws', blockedAgain.execution.nodeToken, 'Use the cleared route again.', 'manager-high', 'actor')).ok, true)
     const redispatchedAgain = spawns[spawns.length - 1]!
-    assert.equal(redispatchedAgain.label, 'role:worker')
+    assert.equal(redispatchedAgain.label, 'send:worker')
     assert.equal(resolveChildAgentOptions(parent, asHostRequested(redispatchedAgain.agentOptions), 1).reasoningEffort, undefined)
   } finally { store.close(); rmSync(home, { recursive: true, force: true }) }
 })
@@ -436,12 +436,12 @@ test('#153 T4: 换到不同模型：原 catalog 显式档位不再生效，后�
     assert.equal(set.ok, true)
     const afterSet = (await store.get('ws'))!
     assert.deepEqual(afterSet.run.modelOverrides.worker, { provider: 'provider-c', modelId: 'model-c' })
-    assert.equal(afterSet.run.roleActors.worker, undefined)
+    assert.equal(afterSet.run.roleActors.worker, oldSession)
     assert.equal((await engine.handleResume('ws', afterSet.execution.nodeToken, 'Use the new model default.', 'manager-high', 'actor')).ok, true)
     const replaced = (await store.get('ws'))!
-    assert.notEqual(replaced.run.roleActors.worker, oldSession, '不沿用旧 low 会话')
+    assert.equal(replaced.run.roleActors.worker, oldSession, '换模不制造额外 fresh')
     const redispatched = spawns[spawns.length - 1]!
-    assert.equal(redispatched.label, 'role:worker')
+    assert.equal(redispatched.label, 'send:worker')
     assert.equal('reasoningEffort' in redispatched.agentOptions!, true, '派发带显式清除键')
     assert.equal(resolveChildAgentOptions(parent, asHostRequested(redispatched.agentOptions), 1).reasoningEffort, undefined,
       '原 catalog low 与 Manager high 都不再生效：后续实际请求使用新模型默认')
