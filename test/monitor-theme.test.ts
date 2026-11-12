@@ -9,8 +9,8 @@ import { bundleSources } from '../web-client/build.mjs'
 function monitorStyles(): string {
   // 执行真实打包转换后的模块，只取样式值：声明顺序和相邻函数不会扩大扫描范围。
   // 依赖仅在组件调用时使用；这里不挂载 React，也不复制 import/export 转换规则。
-  const styles = new Function('require', '__monitorView', '__graphCanvas', '__styles',
-    `${bundleSources().monitor}\nreturn MONITOR_STYLES;`)(() => ({}), {}, {}, {})
+  const styles = new Function('require', '__monitorView', '__graphCanvas', '__styles', '__modelSelector',
+    `${bundleSources().monitor}\nreturn MONITOR_STYLES;`)(() => ({}), {}, {}, {}, {})
   assert.equal(typeof styles, 'string')
   // 去掉注释：注释里会说明「不再用 --dsh-text/#ddd」，不是样式规则本身。
   return styles.replace(/\/\*[\s\S]*?\*\//g, '')

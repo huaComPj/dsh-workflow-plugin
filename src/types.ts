@@ -440,6 +440,8 @@ export interface RoleModelConfig {
   primary: DelegationRoute
   fallback?: DelegationRoute
   revision: number
+  /** #288：仅保留最后一次 GUI 保存收据，重试去重；不是审计历史。 */
+  receipt?: { requestId: string; expectedRevision: number; primary: DelegationRoute; fallback?: DelegationRoute }
 }
 
 /** Run只管位置/控制/固定Snapshot/Role映射；节点材料属于NodeExecution。 */

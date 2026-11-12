@@ -24,6 +24,7 @@ import { StateStore } from '../src/state/store.ts'
 import { makeStateHost } from '../src/plugin/host.ts'
 import { WorkflowEngine } from '../src/engine/engine.ts'
 import { createMonitorRpcHandler } from '../src/monitor/rpc.ts'
+import { projectModelConfig } from '../src/monitor/model-config.ts'
 import { buildClientBundle } from '../web-client/build.mjs'
 
 // ---------------------------------------------------------------------------
@@ -147,7 +148,7 @@ function monitorModule(react: unknown): any {
  * 挂载真实 WorkflowMonitorTab：hooks 由 mini-React 驱动，每挂载一份模块实例
  * （bundle 的 react 依赖在 factory(require) 时注入）。
  */
-function mountMonitor(options: { call: (...args: any[]) => any; props: any }) {
+function mountMonitor(options: { call: (...args: any[]) => any; props: any; modelCatalog?: () => Promise<any> }) {
   const slots: any[] = []
   let index = 0
   let tree: any = null
@@ -200,7 +201,10 @@ function mountMonitor(options: { call: (...args: any[]) => any; props: any }) {
       register: () => ({ dispose() {} }),
     },
     layout: {},
-    remote: {},
+    remote: { session: { modelCatalog: options.modelCatalog ?? (async () => ({ ok: true, value: { groups: [
+      { id: 'prov', name: 'Provider', models: ['m-review', 'm-new', 'm-fallback', 'm-judge'].map(id => ({ id, name: id })) },
+      { id: 'other', name: 'Other', models: [{ id: 'other-model', name: 'Other model' }] },
+    ], failures: [] } })) } },
     inject: (_deps: string[], callback: (ctx: any) => void) => {
       callback({ betterSidebar: { registerTab: (descriptor: any) => { tab = descriptor } } })
     },
@@ -246,15 +250,15 @@ function mountMonitor(options: { call: (...args: any[]) => any; props: any }) {
  */
 function createBridge(handler: (endpoint: string, payload: any) => Promise<any>) {
   const calls: Array<{ endpoint: string; payload: any }> = []
-  const held: Array<{ payload: any; resolve: (result?: unknown) => void }> = []
-  let holdPredicate: ((payload: any) => boolean) | null = null
+  const held: Array<{ endpoint: string; payload: any; resolve: (result?: unknown) => void }> = []
+  let holdPredicate: ((payload: any, endpoint: string) => boolean) | null = null
   let failure: any = null
   const call = (_channel: string, endpoint: string, payload: any) => {
     calls.push({ endpoint, payload })
     if (failure !== null) return Promise.resolve(failure)
-    if (holdPredicate !== null && holdPredicate(payload)) {
+    if (holdPredicate !== null && holdPredicate(payload, endpoint)) {
       return new Promise(resolve => {
-        held.push({ payload, resolve: (result?: unknown) => { resolve(result !== undefined ? result : handler(endpoint, payload)) } })
+        held.push({ endpoint, payload, resolve: (result?: unknown) => { resolve(result !== undefined ? result : handler(endpoint, payload)) } })
       })
     }
     return Promise.resolve(handler(endpoint, payload))
@@ -263,9 +267,9 @@ function createBridge(handler: (endpoint: string, payload: any) => Promise<any>)
     calls,
     held,
     call,
-    hold(predicate: (payload: any) => boolean) { holdPredicate = predicate },
-    release(predicate: (payload: any) => boolean, result?: unknown) {
-      const picked = held.filter(entry => predicate(entry.payload))
+    hold(predicate: (payload: any, endpoint: string) => boolean) { holdPredicate = predicate },
+    release(predicate: (payload: any, endpoint: string) => boolean, result?: unknown) {
+      const picked = held.filter(entry => predicate(entry.payload, entry.endpoint))
       for (const entry of picked) {
         held.splice(held.indexOf(entry), 1)
         entry.resolve(result)
@@ -363,7 +367,41 @@ function createWorld() {
     events: async runId => { stateReads += 1; return store.runEventsByRunId(runId) },
     layout: async () => undefined,
   })
-  const bridge = createBridge((endpoint, payload) => handler(endpoint, payload))
+  // #288 客户端生命周期使用受控配置响应；身份闸门/真实控制 RPC→Engine 链由服务端测试覆盖。
+  // status 仍走本文件原有真实 Engine + SQLite 投影，绝不伪装浏览器身份或 Manager。
+  const modelValues = new Map<string, any>()
+  const savedRequests = new Map<string, any>()
+  let modelHandler: ((endpoint: string, payload: any) => Promise<any>) | undefined
+  const modelValue = async (runId: string) => {
+    const row = await store.getByRunId(runId)
+    if (!row) return undefined
+    if (!modelValues.has(runId)) modelValues.set(runId, {
+      runId, workspaceKey: row.workspaceKey, workflowId: row.run.workflowId, status: row.run.status, terminal: false,
+      roles: ['reviewer', 'judge'].map(role => ({ role, revision: 0,
+        primary: { provider: 'prov', modelId: role === 'judge' ? 'm-judge' : 'm-review' },
+        actual: { provider: 'prov', modelId: role === 'judge' ? 'm-judge' : 'm-review' }, pending: false })),
+    })
+    const value = modelValues.get(runId)
+    value.status = row.run.status
+    value.terminal = row.run.status === 'completed' || row.run.status === 'terminated'
+    return structuredClone(value)
+  }
+  const bridge = createBridge(async (endpoint, payload) => {
+    if (endpoint !== 'model-config' && endpoint !== 'model-config-save') return handler(endpoint, payload)
+    if (modelHandler) return modelHandler(endpoint, payload)
+    const value = await modelValue(payload.runId)
+    if (!value) return { ok: false, error: { code: 'model-config/target-not-found', message: '目标 Run 不存在' } }
+    if (endpoint === 'model-config') return { ok: true, value }
+    if (savedRequests.has(payload.requestId)) return savedRequests.get(payload.requestId)
+    if (value.terminal) return { ok: false, error: { code: 'model-config/read-only', message: 'Run 已结束，只读' } }
+    const role = value.roles.find((item: any) => item.role === payload.role)
+    if (role.revision !== payload.expectedRevision) return { ok: false, error: { code: 'model-config/conflict', message: '配置版本冲突', details: { latest: value } } }
+    Object.assign(role, { revision: role.revision + 1, primary: payload.primary, fallback: payload.fallback, pending: true })
+    modelValues.set(payload.runId, value)
+    const result = { ok: true, value: structuredClone(value) }
+    savedRequests.set(payload.requestId, result)
+    return result
+  })
 
   const claim = async (workspaceKey: string, caller: ClaimCaller, result: string, handoff: string) => {
     assert.equal((await engine.handleClaim(workspaceKey, { result, handoff }, caller)).ok, true)
@@ -380,6 +418,9 @@ function createWorld() {
     engine,
     clock,
     bridge,
+    modelValue,
+    setModelValue(runId: string, value: any) { modelValues.set(runId, structuredClone(value)) },
+    setModelHandler(value?: (endpoint: string, payload: any) => Promise<any>) { modelHandler = value },
     get stateReads() { return stateReads },
     get documentListeners() { return listenerCount('visibilitychange') },
     setMaintenance(value: any) { maintenance = value },
@@ -406,8 +447,8 @@ function createWorld() {
       assert.equal(row.run.status, 'completed')
       return row.run.runId
     },
-    mount(scope: any, visible = true) {
-      return mountMonitor({ call: bridge.call, props: { scope, visible } })
+    mount(scope: any, visible = true, modelCatalog?: () => Promise<any>) {
+      return mountMonitor({ call: bridge.call, props: { scope, visible }, modelCatalog })
     },
     tick: (ms = 2000) => clock.advance(ms),
     cleanup() {
@@ -422,6 +463,316 @@ function createWorld() {
 // ---------------------------------------------------------------------------
 // 验收：票面 10 项断言的外部行为
 // ---------------------------------------------------------------------------
+
+test('#288 模型配置按需打开，固定精确 Run/工作区且不显示 Manager', async () => {
+  const w = createWorld()
+  try {
+    const runId = await w.startRun('ws-a', 'A')
+    const ui = w.mount({ cwd: 'ws-a' })
+    await settle()
+    const button = ui.find((element: any) => element.type === 'button' && textOf(element) === '模型配置')
+    assert.ok(button !== null, '顶栏提供按需模型配置入口')
+    assert.equal(ui.find((element: any) => element.props['aria-label'] === '运行模型配置'), null)
+    button.props.onClick()
+    await settle()
+    assert.match(ui.text(), new RegExp(`目标 Run：${runId}`))
+    assert.match(ui.text(), /目标工作区：ws-a/)
+    assert.ok(w.bridge.calls.some(call => call.endpoint === 'model-config' && call.payload.runId === runId))
+    ui.unmount()
+  } finally { w.cleanup() }
+})
+
+function modelButton(ui: ReturnType<typeof mountMonitor>, label: string) {
+  const element = ui.find((item: any) => item.type === 'button' && textOf(item) === label)
+  assert.ok(element, `缺少按钮：${label}`)
+  return element
+}
+function modelField(ui: ReturnType<typeof mountMonitor>, label: string) {
+  const element = ui.find((item: any) => item.props['aria-label'] === label)
+  assert.ok(element, `缺少字段：${label}`)
+  return element
+}
+async function clickModel(ui: ReturnType<typeof mountMonitor>, label: string) {
+  modelButton(ui, label).props.onClick()
+  await settle()
+}
+async function changeModel(ui: ReturnType<typeof mountMonitor>, label: string, value: string) {
+  modelField(ui, label).props.onChange({ target: { value } })
+  await settle()
+}
+
+test('#288 单角色主/备独立档位原子保存、清空/default 与实际派发分离', async () => {
+  const w = createWorld()
+  try {
+    const runId = await w.startRun('ws-a', 'A')
+    const ui = w.mount({ cwd: 'ws-a' }); await settle(); await clickModel(ui, '模型配置')
+    const roleSelect = modelField(ui, '模型配置角色')
+    const options = collect(roleSelect, item => item.type === 'option').map(item => item.props.value)
+    assert.deepEqual(options, ['reviewer', 'judge'], '仅普通角色和 Judge，没有 Manager')
+    await changeModel(ui, '主模型 modelId', 'm-new')
+    await changeModel(ui, '主模型 思考档位', 'high')
+    await changeModel(ui, '备用模型（可选） provider', 'prov')
+    await changeModel(ui, '备用模型（可选） modelId', 'm-fallback')
+    await changeModel(ui, '备用模型（可选） 思考档位', 'low')
+    await w.tick()
+    assert.equal(modelField(ui, '主模型 思考档位').props.value, 'high', '轮询不覆盖草稿')
+    const update = modelButton(ui, '更新，下次从主模型开始')
+    update.props.onClick(); update.props.onClick(); await settle()
+    const saved = w.bridge.calls.filter(call => call.endpoint === 'model-config-save')
+    assert.equal(saved.length, 1)
+    assert.deepEqual(saved[0]!.payload.primary, { provider: 'prov', modelId: 'm-new', reasoningEffort: 'high' })
+    assert.deepEqual(saved[0]!.payload.fallback, { provider: 'prov', modelId: 'm-fallback', reasoningEffort: 'low' })
+    assert.equal(saved[0]!.payload.runId, runId)
+    assert.equal(saved[0]!.payload.role, 'reviewer')
+    assert.equal(saved[0]!.payload.expectedRevision, 0)
+    assert.match(ui.text(), /实际派发模型：prov\/m-review/)
+    assert.match(ui.text(), /已保存主模型：prov\/m-new · high/)
+    assert.match(ui.text(), /已保存待生效/)
+    await clickModel(ui, '使用模型默认档位')
+    await clickModel(ui, '清空备用（禁用）')
+    await clickModel(ui, '更新，下次从主模型开始')
+    const second = w.bridge.calls.filter(call => call.endpoint === 'model-config-save')[1]!.payload
+    assert.deepEqual(second.primary, { provider: 'prov', modelId: 'm-new' })
+    assert.equal('fallback' in second, false, '清空备用表示禁用，不继承冻结备用')
+    assert.notEqual(second.requestId, saved[0]!.payload.requestId)
+    await changeModel(ui, '主模型 思考档位', 'high')
+    await changeModel(ui, '主模型 provider', 'other')
+    assert.equal(modelField(ui, '主模型 思考档位').props.value, '')
+    assert.equal(modelField(ui, '主模型 modelId').props.value, '')
+    assert.equal(modelField(ui, '备用模型（可选） 思考档位').props.value, '')
+    await changeModel(ui, '主模型 modelId', 'other-model')
+    await changeModel(ui, '主模型 思考档位', 'low')
+    await changeModel(ui, '主模型 modelId', 'm-new')
+    assert.equal(modelField(ui, '主模型 思考档位').props.value, '', '模型切换清掉旧 effort')
+    ui.unmount()
+  } finally { w.cleanup() }
+})
+
+test('#288 关闭、切角色、跨工作区切 Run 均确认草稿并固定准确目标', async () => {
+  const w = createWorld()
+  try {
+    const a = await w.startRun('ws-a', 'A'); const b = await w.startRun('ws-b', 'B')
+    const ui = w.mount({ cwd: 'ws-a' }); await settle(); await clickModel(ui, '模型配置')
+    await changeModel(ui, '主模型 思考档位', 'high')
+    await clickModel(ui, '关闭模型配置')
+    assert.ok(modelField(ui, '放弃模型配置草稿确认'))
+    await clickModel(ui, '继续编辑')
+    assert.equal(modelField(ui, '主模型 思考档位').props.value, 'high')
+    await changeModel(ui, '模型配置角色', 'judge')
+    assert.equal(modelField(ui, '模型配置角色').props.value, 'reviewer')
+    await clickModel(ui, '放弃并继续')
+    assert.equal(modelField(ui, '模型配置角色').props.value, 'judge')
+    await changeModel(ui, '主模型 思考档位', 'low')
+    await changeModel(ui, '切换运行', b)
+    assert.match(ui.text(), new RegExp(`目标 Run：${a}`))
+    assert.equal(ui.select().props.value, '')
+    await clickModel(ui, '继续编辑')
+    assert.equal(ui.select().props.value, '')
+    await changeModel(ui, '切换运行', b); await clickModel(ui, '放弃并继续')
+    assert.equal(ui.select().props.value, b)
+    assert.equal(ui.find((item: any) => item.props['aria-label'] === '运行模型配置'), null)
+    await clickModel(ui, '模型配置')
+    assert.match(ui.text(), new RegExp(`目标 Run：${b}`)); assert.match(ui.text(), /目标工作区：ws-b/)
+    await clickModel(ui, '更新，下次从主模型开始')
+    const save = w.bridge.calls.find(call => call.endpoint === 'model-config-save')!
+    assert.equal(save.payload.runId, b, '跨工作区不是按当前 cwd 写入 A')
+    ui.unmount()
+  } finally { w.cleanup() }
+})
+
+test('#288 同角色冲突保留草稿和最新配置，核对后才主动重提', async () => {
+  const w = createWorld()
+  try {
+    const runId = await w.startRun('ws-a')
+    const ui = w.mount({ cwd: 'ws-a' }); await settle(); await clickModel(ui, '模型配置')
+    await changeModel(ui, '主模型 思考档位', 'high')
+    w.bridge.hold((_payload, endpoint) => endpoint === 'model-config-save')
+    await clickModel(ui, '更新，下次从主模型开始')
+    const latest = await w.modelValue(runId); latest.roles[0].revision = 1; latest.roles[0].primary.modelId = 'm-new'
+    w.setModelValue(runId, latest)
+    w.bridge.hold(() => false); w.bridge.release((_payload, endpoint) => endpoint === 'model-config-save'); await settle()
+    assert.match(ui.text(), /配置版本冲突/)
+    assert.match(ui.text(), /已保存主模型：prov\/m-new/)
+    assert.equal(modelField(ui, '主模型 modelId').props.value, 'm-review')
+    assert.equal(modelField(ui, '主模型 思考档位').props.value, 'high')
+    assert.equal(modelButton(ui, '更新，下次从主模型开始').props.disabled, true)
+    assert.equal(w.bridge.calls.filter(call => call.endpoint === 'model-config-save').length, 1)
+    await clickModel(ui, '核对后使用最新配置版本')
+    assert.equal(modelField(ui, '主模型 思考档位').props.value, 'high')
+    await clickModel(ui, '更新，下次从主模型开始')
+    const saves = w.bridge.calls.filter(call => call.endpoint === 'model-config-save')
+    assert.equal(saves[1]!.payload.expectedRevision, 1)
+    assert.notEqual(saves[0]!.payload.requestId, saves[1]!.payload.requestId)
+    assert.equal((await w.modelValue(runId)).roles[0].revision, 2)
+    ui.unmount()
+  } finally { w.cleanup() }
+})
+
+test('#288 超时结果未知、重传同一请求不重复恢复，新更新才换 ID', async () => {
+  const w = createWorld()
+  try {
+    const runId = await w.startRun('ws-a')
+    const ui = w.mount({ cwd: 'ws-a' }); await settle(); await clickModel(ui, '模型配置')
+    w.bridge.hold((_payload, endpoint) => endpoint === 'model-config-save')
+    await clickModel(ui, '更新，下次从主模型开始')
+    await w.tick(15_001)
+    assert.match(ui.text(), /保存结果未知/)
+    assert.equal(modelField(ui, '主模型 modelId').props.disabled, true)
+    await clickModel(ui, '关闭模型配置')
+    assert.match(ui.text(), /不会撤销请求/)
+    await clickModel(ui, '继续编辑')
+    w.bridge.hold(() => false); w.bridge.release((_payload, endpoint) => endpoint === 'model-config-save'); await settle()
+    assert.match(ui.text(), /保存结果未知/, '第一次已超时，迟到成功不能静默改写 UI')
+    await clickModel(ui, '重传同一次更新')
+    const saves = w.bridge.calls.filter(call => call.endpoint === 'model-config-save')
+    assert.deepEqual(saves[0]!.payload, saves[1]!.payload)
+    assert.equal((await w.modelValue(runId)).roles[0].revision, 1)
+    await clickModel(ui, '更新，下次从主模型开始')
+    const third = w.bridge.calls.filter(call => call.endpoint === 'model-config-save')[2]!.payload
+    assert.notEqual(third.requestId, saves[0]!.payload.requestId, '相同配置的主动更新也是新恢复轮次')
+    assert.equal((await w.modelValue(runId)).roles[0].revision, 2)
+    ui.unmount()
+  } finally { w.cleanup() }
+})
+
+test('#288 A 的迟到保存成功/错误不能归到 B，旧配置读取错误也被丢弃', async () => {
+  for (const lateSuccess of [true, false]) {
+    const w = createWorld()
+    try {
+      const a = await w.startRun('ws-a'); const b = await w.startRun('ws-b')
+      const ui = w.mount({ cwd: 'ws-a' }); await settle(); await clickModel(ui, '模型配置')
+      w.bridge.hold((_payload, endpoint) => endpoint === 'model-config-save')
+      await clickModel(ui, '更新，下次从主模型开始')
+      await changeModel(ui, '切换运行', b); await clickModel(ui, '放弃并继续'); await clickModel(ui, '模型配置')
+      const before = ui.text()
+      w.bridge.hold(() => false)
+      w.bridge.release((payload, endpoint) => endpoint === 'model-config-save' && payload.runId === a,
+        lateSuccess ? { ok: true, value: await w.modelValue(a) } : { ok: false, error: { code: 'model-config/save-failed', message: 'ONLY_OLD_A_FAILURE' } })
+      await settle()
+      assert.equal(ui.text(), before)
+      assert.doesNotMatch(ui.text(), /ONLY_OLD_A_FAILURE|已保存：下次新派发生效/)
+      await clickModel(ui, '关闭模型配置')
+      await changeModel(ui, '切换运行', a)
+      w.bridge.hold((_payload, endpoint) => endpoint === 'model-config')
+      await clickModel(ui, '模型配置'); await clickModel(ui, '关闭模型配置')
+      w.bridge.hold(() => false); await changeModel(ui, '切换运行', b); await clickModel(ui, '模型配置')
+      const fresh = ui.text()
+      w.bridge.release((payload, endpoint) => endpoint === 'model-config' && payload.runId === a,
+        { ok: false, error: { code: 'model-config/unavailable', message: 'ONLY_OLD_A_READ' } }); await settle()
+      assert.equal(ui.text(), fresh)
+      ui.unmount()
+    } finally { w.cleanup() }
+  }
+})
+
+test('#288 终态只读，配置校验失败保留草稿，未知模型仍完整可见', async () => {
+  const w = createWorld()
+  try {
+    const runId = await w.startRun('ws-a')
+    const value = await w.modelValue(runId); value.roles[0].primary = { provider: 'legacy', modelId: 'unknown-model', reasoningEffort: 'high' }
+    w.setModelValue(runId, value)
+    const ui = w.mount({ cwd: 'ws-a' }); await settle(); await clickModel(ui, '模型配置')
+    assert.match(ui.text(), /完整路由：legacy\/unknown-model/)
+    assert.equal(modelField(ui, '主模型 provider').props.value, 'legacy')
+    w.setModelHandler(async () => ({ ok: false, error: { code: 'model-config/invalid-route', message: '不支持该思考档位' } }))
+    await clickModel(ui, '更新，下次从主模型开始')
+    assert.match(ui.text(), /不支持该思考档位/)
+    assert.equal(modelField(ui, '主模型 思考档位').props.value, 'high')
+    ui.unmount(); w.setModelHandler()
+    await w.completeRun('ws-terminal')
+    const terminal = w.mount({ cwd: 'ws-terminal' }); await settle(); await clickModel(terminal, '模型配置')
+    assert.match(terminal.text(), /已结束，只读/)
+    assert.equal(modelButton(terminal, '更新，下次从主模型开始').props.disabled, true)
+    terminal.unmount()
+  } finally { w.cleanup() }
+})
+
+test('#288 保存 C 后图节点明确配置 C，实际 A/既有历史不变且未派发节点不冒充实际', async () => {
+  const w = createWorld()
+  try {
+    const definition = structuredClone(config)
+    definition.workflow.nodes.later = structuredClone(definition.workflow.nodes.review!)
+    definition.workflow.nodes.review!.results!.succeeded!.target = { node: 'later' }
+    const runId = await w.startRun('ws-a', 'graph-config', definition)
+    const plan = (await w.store.get('ws-a'))!
+    const manager = { sessionId: 'manager', turnUserMessageIds: new Set([plan.execution.dispatch!.messageId!]) }
+    assert.equal((await w.engine.handleClaim('ws-a', { result: 'succeeded', handoff: 'plan' }, manager)).ok, true)
+    await w.engine.handleTurnEnded('ws-a', manager)
+    const checking = (await w.store.get('ws-a'))!
+    const judge = { sessionId: checking.execution.judge!.sessionId!, turnUserMessageIds: new Set([checking.execution.judge!.messageId!]) }
+    assert.equal((await w.engine.handleJudgeClaim('ws-a', checking.execution.nodeToken, 'ACCEPT', 'pass', judge)).ok, true)
+    await w.engine.handleTurnEnded('ws-a', judge)
+    // 客户端受控 RPC seam 只连接真实配置服务/投影，不伪造 browser/Manager 身份。
+    w.setModelHandler(async (endpoint, payload) => {
+      if (endpoint === 'model-config-save') assert.equal((await w.engine.handleSaveRoleModelConfig('ws-a', payload)).ok, true)
+      return { ok: true, value: projectModelConfig((await w.store.get('ws-a'))!, await w.store.runExecutionsByRunId(runId)) }
+    })
+    const before = (await w.store.get('ws-a'))!
+    const history = await w.store.runEventsByRunId(runId)
+    const executions = await w.store.runExecutionsByRunId(runId)
+    assert.equal(before.execution.dispatch!.model!.modelId, 'm-review')
+    const ui = w.mount({ cwd: 'ws-a' }); await settle(); await clickModel(ui, '模型配置')
+    await changeModel(ui, '主模型 modelId', 'm-new'); await clickModel(ui, '更新，下次从主模型开始'); await w.tick()
+    const canvas = ui.find((item: any) => typeof item.type === 'function' && item.props.readOnly === true && item.props.decorations)
+    assert.ok(canvas)
+    assert.equal(canvas.props.decorations.review.summary, '配置模型：prov/m-new', '当前节点的可见画布摘要明确是解析配置，不是派发事实')
+    assert.equal(canvas.props.decorations.later.summary, '配置模型：prov/m-new', '未派发节点同为配置，不标成待生效或下次实际模型')
+    assert.equal(canvas.props.decorations.later.badge, undefined, '未派发节点没有虚构运行态')
+    const current = ui.find((item: any) => item.props.className === 'wf-monitor-current')
+    assert.match(textOf(current), /prov\/m-review · 首选/)
+    assert.doesNotMatch(textOf(current), /prov\/m-new/)
+    assert.match(ui.text(), /实际派发模型：prov\/m-review/)
+    assert.match(ui.text(), /已保存主模型：prov\/m-new/)
+    assert.deepEqual((await w.store.get('ws-a'))!.execution, before.execution)
+    assert.deepEqual(await w.store.runExecutionsByRunId(runId), executions)
+    assert.deepEqual(await w.store.runEventsByRunId(runId), history)
+    ui.unmount()
+  } finally { w.cleanup() }
+})
+
+test('#288 外部 cwd 变化保留原目标草稿并暂停保存，返回目标后继续', async () => {
+  const w = createWorld()
+  try {
+    const a = await w.startRun('ws-a'); await w.startRun('ws-b')
+    const ui = w.mount({ cwd: 'ws-a' }); await settle(); await clickModel(ui, '模型配置')
+    await changeModel(ui, '主模型 思考档位', 'high')
+    ui.setProps({ scope: { cwd: 'ws-b' } }); await settle()
+    assert.match(ui.text(), /当前监控已切换/)
+    assert.match(ui.text(), new RegExp(`目标 Run：${a}`))
+    assert.equal(modelField(ui, '主模型 思考档位').props.value, 'high')
+    assert.equal(modelButton(ui, '更新，下次从主模型开始').props.disabled, true)
+    await clickModel(ui, '更新，下次从主模型开始')
+    assert.equal(w.bridge.calls.filter(call => call.endpoint === 'model-config-save').length, 0)
+    await clickModel(ui, '返回编辑目标 Run')
+    assert.equal(ui.select().props.value, a)
+    assert.equal(modelButton(ui, '更新，下次从主模型开始').props.disabled, false)
+    await clickModel(ui, '更新，下次从主模型开始')
+    assert.equal(w.bridge.calls.find(call => call.endpoint === 'model-config-save')!.payload.runId, a)
+    ui.unmount()
+  } finally { w.cleanup() }
+})
+
+test('#288 目录失败不清空已有路由，刷新恢复也不覆盖草稿', async () => {
+  const w = createWorld()
+  try {
+    await w.startRun('ws-a')
+    let available = false
+    const ui = w.mount({ cwd: 'ws-a' }, true, async () => available
+      ? { ok: true, value: { groups: [{ id: 'other', name: 'Other', models: [{ id: 'new', name: 'New' }] }], failures: [] } }
+      : { ok: false, error: { message: 'CATALOG_UNAVAILABLE' } })
+    await settle(); await clickModel(ui, '模型配置')
+    assert.match(ui.text(), /CATALOG_UNAVAILABLE/)
+    assert.equal(modelField(ui, '主模型 provider').props.value, 'prov')
+    assert.equal(modelField(ui, '主模型 modelId').props.value, 'm-review')
+    await changeModel(ui, '主模型 思考档位', 'high')
+    available = true; await clickModel(ui, '刷新模型列表')
+    assert.doesNotMatch(ui.text(), /CATALOG_UNAVAILABLE/)
+    assert.equal(modelField(ui, '主模型 思考档位').props.value, 'high')
+    assert.equal(modelField(ui, '主模型 modelId').props.value, 'm-review')
+    assert.match(textOf(modelField(ui, '主模型 provider')), /other/)
+    ui.unmount()
+  } finally { w.cleanup() }
+})
 
 test('#261 维护态：继续按周期探测，状态库恢复后自愈（不重挂载）', async () => {
   const w = createWorld()

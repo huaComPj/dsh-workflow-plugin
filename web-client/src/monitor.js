@@ -3,12 +3,13 @@
  * RPC 失败显示横幅并保留上一次成功数据，恢复后自动清横幅继续轮询。
  * #261：轮询上下文 = (scope.cwd, 选定 runId)，切目录/切 Run/重新可见都重建周期，
  * 旧上下文的在途响应一律丢弃；终态 Run 停周期，另给只读「刷新状态」入口。
- * 只读展示：run 信息条 + 启动 prompt 展开 + 节点列表；无任何控制入口（ADR-0005）。
+ * status 保持只读；#288 按需模型配置经独立、鉴权的控制 RPC 提交。
  */
 import { createElement as h, useState, useEffect, useRef } from 'react'
 import { monitorViewModel, monitorErrorState, monitorPollingContinues, initialFollowState, monitorFollowView, selectFlow, resumeFollow, RECORD_COLUMNS } from './monitor-view.js'
 import { NodeCanvas } from './graph-canvas.js'
 import { EDITOR_STYLES } from './styles.js'
+import { modelChoices } from './model-selector.js'
 
 const POLL_INTERVAL_MS = 2000
 
@@ -34,6 +35,12 @@ export const MONITOR_STYLES = `
 .wf-monitor-status.run-ok { color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 45%, ${MONITOR_TEXT}); }
 .wf-monitor-muted { color: ${MONITOR_MUTED}; }
 /* #286 摘要并入顶栏，随侧栏宽度自然换行。 */
+.wf-model-config { border: 1px solid currentColor; border-radius: 6px; padding: 8px; overflow-wrap: anywhere; }
+.wf-model-config-route { display: flex; flex-wrap: wrap; gap: 8px; margin-block: 8px; min-width: 0; }
+.wf-model-config-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.wf-model-config select, .wf-model-config input { max-width: 100%; color: inherit; background: transparent; }
+.wf-model-config input:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, currentColor); }
+.wf-model-config-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .wf-monitor-summary { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; min-width: 0; flex: 1 1 200px; }
 .wf-monitor-return-value { color: ${MONITOR_MUTED}; }
 .wf-monitor-terminal-note { margin-left: auto; color: ${MONITOR_MUTED}; font-size: 12px; }
@@ -316,7 +323,79 @@ function recordsEl(records, openKey, onToggle) {
   )
 }
 
-export function WorkflowMonitorTab({ fetchStatus, visible = true, scope }) {
+const emptyModelForm = () => ({ provider: '', modelId: '', effort: '' })
+const modelFormOf = route => ({ provider: route?.provider ?? '', modelId: route?.modelId ?? '', effort: route?.reasoningEffort ?? '' })
+const modelDraftOf = role => ({ primary: modelFormOf(role.primary), fallback: modelFormOf(role.fallback) })
+const modelRouteOf = form => ({ provider: form.provider, modelId: form.modelId, ...(form.effort.trim() === '' ? {} : { reasoningEffort: form.effort.trim() }) })
+const routeText = route => route?.provider && route?.modelId
+  ? `${route.provider}/${route.modelId}${route.reasoningEffort ? ` · ${route.reasoningEffort}` : ' · 模型默认档位'}` : '未记录'
+const modelDraftDirty = editor => editor?.draft && JSON.stringify(editor.draft) !== JSON.stringify(modelDraftOf(editor.baseline))
+
+/** 仅渲染表单，生命周期留在监控模块；目录是建议，最终路由/能力校验由服务端完成。 */
+function modelEditorEl(editor, catalog, actions) {
+  if (editor === null) return null
+  const latestRole = editor.latest?.roles?.find(role => role.role === editor.role)
+  const terminal = editor.latest?.terminal || (editor.latest !== null && !['running', 'blocked'].includes(editor.latest.status))
+  const readonly = terminal || !actions.targetMatches
+  const busy = editor.saving || editor.pending !== null
+  const fields = (kind, title) => {
+    const form = editor.draft[kind]
+    const { providers, models } = modelChoices(catalog.groups, form.provider, form.modelId)
+    const select = (label, value, choices, change) => h('label', { className: 'wf-model-config-field' }, label,
+      h('select', { 'aria-label': `${title} ${label}`, value, disabled: busy || readonly, onChange: event => change(event.target.value) },
+        h('option', { value: '' }, '请选择'), ...choices.map(item => h('option', { key: item.id, value: item.id }, `${item.name} (${item.id})`))))
+    return h('fieldset', { className: 'wf-model-config-route', disabled: busy || readonly },
+      h('legend', null, title),
+      select('provider', form.provider, providers, provider => actions.field(kind, { provider, modelId: '', effort: '' })),
+      select('modelId', form.modelId, models, modelId => actions.field(kind, { modelId, effort: '' })),
+      h('label', { className: 'wf-model-config-field' }, '思考档位（留空 = 模型默认）',
+        h('input', { 'aria-label': `${title} 思考档位`, value: form.effort, disabled: busy || readonly,
+          onChange: event => actions.field(kind, { effort: event.target.value }) })),
+      h('button', { type: 'button', disabled: busy || readonly, onClick: () => actions.field(kind, kind === 'fallback' ? emptyModelForm() : { effort: '' }) },
+        kind === 'fallback' ? '清空备用（禁用）' : '使用模型默认档位'),
+      h('small', null, form.provider && form.modelId ? `完整路由：${form.provider}/${form.modelId}` : kind === 'primary' ? '主模型必填' : '未配置备用（禁用）'))
+  }
+  return h('section', { className: 'wf-model-config', 'aria-label': '运行模型配置' },
+    h('div', { className: 'wf-monitor-card-head' }, h('strong', null, '模型配置'),
+      h('button', { type: 'button', onClick: actions.close }, '关闭模型配置')),
+    h('div', null, `目标 Run：${editor.target.runId}`),
+    h('div', null, `目标工作区：${editor.target.workspaceKey}`),
+    !actions.targetMatches ? h('div', { role: 'alert' }, '当前监控已切换；原目标草稿已保留，暂停更新，绝不自动改写其他 Run。',
+      h('button', { type: 'button', onClick: actions.returnTarget }, '返回编辑目标 Run')) : null,
+    h('p', { className: 'wf-monitor-muted' }, '只修改此 Run 的下一次新派发配置；不打断当前任务，BLOCK 不会自动恢复。'),
+    editor.loading ? h('p', { role: 'status' }, '正在读取模型配置…') : null,
+    editor.error ? h('p', { role: 'alert' }, editor.error) : null,
+    editor.notice ? h('p', { role: 'status' }, editor.notice) : null,
+    editor.draft ? h('div', null,
+      h('label', { className: 'wf-model-config-field' }, '角色',
+        h('select', { 'aria-label': '模型配置角色', value: editor.role, disabled: busy,
+          onChange: event => actions.role(event.target.value) },
+        ...editor.latest.roles.filter(role => role.role !== 'manager').map(role => h('option', { key: role.role, value: role.role }, role.role === 'judge' ? 'Judge' : role.role)))),
+      h('div', null, `实际派发模型：${routeText(latestRole?.actual)}`),
+      h('div', null, `已保存主模型：${routeText(latestRole?.primary)}`),
+      h('div', null, `已保存备用：${latestRole?.fallback ? routeText(latestRole.fallback) : '禁用'}`),
+      h('div', { role: 'status' }, latestRole?.pending ? '已保存待生效：下次新派发生效' : '已保存配置；实际派发以运行记录为准'),
+      terminal ? h('p', { role: 'status' }, '目标 Run 已结束，只读；不能更新模型配置。') : null,
+      fields('primary', '主模型'), fields('fallback', '备用模型（可选）'),
+      latestRole?.revision !== editor.baseline.revision ? h('div', { role: 'alert' },
+        '模型配置已被其他人或工具修改；本地草稿已保留。请核对上方最新配置。',
+        h('button', { type: 'button', disabled: busy || readonly, onClick: actions.rebase }, '核对后使用最新配置版本')) : null,
+      h('div', { className: 'wf-model-config-actions' },
+        h('button', { type: 'button', disabled: busy || readonly || latestRole?.revision !== editor.baseline.revision,
+          onClick: actions.save }, '更新，下次从主模型开始'),
+        editor.unknown ? h('button', { type: 'button', disabled: editor.saving || readonly, onClick: actions.retry }, '重传同一次更新') : null,
+        h('button', { type: 'button', disabled: catalog.loading, onClick: actions.reloadModels }, '刷新模型列表')),
+      editor.unknown ? h('p', { role: 'alert' }, '保存结果未知，服务端可能已保存。重传会复用同一请求，不会再次重开恢复轮次；关闭不会撤销保存。') : null,
+      catalog.error ? h('p', { role: 'alert' }, catalog.error) : null,
+      ...catalog.failures.map(failure => h('p', { key: failure.id, role: 'status' }, `${failure.name}：${failure.message}`)),
+    ) : null,
+    editor.leave ? h('div', { role: 'alertdialog', 'aria-label': '放弃模型配置草稿确认' },
+      h('p', null, editor.pending ? '更新可能已经保存；关闭或切换不会撤销请求。是否放弃本地草稿和重传状态？' : '尚有未保存草稿，是否放弃？'),
+      h('button', { type: 'button', onClick: actions.stay }, '继续编辑'),
+      h('button', { type: 'button', onClick: actions.discard }, '放弃并继续')) : null)
+}
+
+export function WorkflowMonitorTab({ fetchStatus, configRpc, loadModels, visible = true, scope }) {
   // 目录只来自 tab scope.cwd；缺席/空串不回退宿主 process.cwd（R1 F4）。
   const cwd = typeof scope?.cwd === 'string' && scope.cwd !== '' ? scope.cwd : null
   // 选择与目录绑在一起：cwd 变化即回到「当前目录（默认）」，不等 effect 事后纠正（#261）。
@@ -334,6 +413,135 @@ export function WorkflowMonitorTab({ fetchStatus, visible = true, scope }) {
   )
   const view = monitorViewModel(data, { banner })
   const returnedRunId = view.mode === 'run' || view.mode === 'terminal' ? view.run.runId : null
+  const [modelEditor, setModelEditor] = useState(null)
+  const [modelCatalog, setModelCatalog] = useState({ groups: [], failures: [], loading: false, error: '' })
+  const [catalogRevision, setCatalogRevision] = useState(0)
+  const editorEpoch = useRef(0)
+  const readEpoch = useRef(0)
+  const savingRequest = useRef(null)
+  const editorRef = useRef(modelEditor)
+  editorRef.current = modelEditor
+  const configRpcRef = useRef(configRpc)
+  configRpcRef.current = configRpc
+  const openModels = () => {
+    if (returnedRunId === null) return
+    editorEpoch.current += 1
+    setModelEditor({ target: { runId: returnedRunId, workspaceKey: view.run.workspaceKey }, loading: true,
+      role: '', draft: null, baseline: null, latest: null, pending: null, saving: false, unknown: false, error: '', notice: '', leave: null })
+  }
+  const leaveEditor = action => {
+    const editor = editorRef.current
+    if (editor !== null && (modelDraftDirty(editor) || editor.pending !== null)) {
+      setModelEditor(previous => ({ ...previous, leave: action }))
+      return
+    }
+    editorEpoch.current += 1
+    setModelEditor(null)
+    if (action.kind === 'run') setSelection({ cwd, runId: action.runId })
+  }
+  const chooseRole = role => {
+    const editor = editorRef.current
+    if (role === editor.role) return
+    if (modelDraftDirty(editor)) { setModelEditor(previous => ({ ...previous, leave: { kind: 'role', role } })); return }
+    const baseline = editor.latest.roles.find(item => item.role === role)
+    if (baseline) setModelEditor(previous => ({ ...previous, role, baseline, draft: modelDraftOf(baseline), error: '', notice: '', leave: null }))
+  }
+  // 模型读取不沿用 status 的失效 ID 回退；旧目标/旧读取的成功和失败都不能污染新面板。
+  useEffect(() => {
+    if (modelEditor === null) return undefined
+    const target = modelEditor.target
+    const epoch = editorEpoch.current
+    const reading = ++readEpoch.current
+    let active = true
+    Promise.resolve().then(() => configRpcRef.current('model-config', { runId: target.runId })).then(result => {
+      if (!active || epoch !== editorEpoch.current || reading !== readEpoch.current) return
+      setModelEditor(previous => {
+        if (previous === null || previous.target.runId !== target.runId) return previous
+        if (!result.ok) return { ...previous, loading: false, error: result.error?.message ?? '无法读取模型配置' }
+        const latest = result.value
+        if (latest.runId !== target.runId || latest.workspaceKey !== target.workspaceKey) return { ...previous, loading: false, error: '模型配置返回的目标不匹配；拒绝使用。' }
+        const roles = latest.roles.filter(role => role.role !== 'manager')
+        const baseline = previous.baseline ?? roles[0]
+        return { ...previous, loading: false, latest: { ...latest, roles },
+          ...(baseline && previous.baseline === null ? { baseline, role: baseline.role, draft: modelDraftOf(baseline) } : {}) }
+      })
+    }).catch(error => {
+      if (active && epoch === editorEpoch.current && reading === readEpoch.current) setModelEditor(previous => previous === null ? previous : { ...previous, loading: false, error: String(error) })
+    })
+    return () => { active = false }
+  }, [data, modelEditor?.target.runId])
+  useEffect(() => {
+    if (modelEditor === null) return undefined
+    let active = true
+    setModelCatalog(previous => ({ ...previous, loading: true, error: '' }))
+    Promise.resolve().then(() => loadModels()).then(value => {
+      if (active) setModelCatalog({ ...value, loading: false, error: '' })
+    }, error => { if (active) setModelCatalog(previous => ({ ...previous, loading: false, error: String(error.message ?? error) })) })
+    return () => { active = false }
+  }, [modelEditor !== null, loadModels, catalogRevision])
+  const saveModels = async retry => {
+    const editor = editorRef.current
+    if (editor === null || editor.saving || editor.draft === null || editor.target.runId !== returnedRunId
+      || savingRequest.current?.epoch === editorEpoch.current || (editor.pending !== null && !retry)) return
+    let pending = retry ? editor.pending : null
+    if (pending === null) {
+      const { primary, fallback } = editor.draft
+      if (!primary.provider || !primary.modelId || ((fallback.provider || fallback.modelId || fallback.effort) && (!fallback.provider || !fallback.modelId))) {
+        setModelEditor(previous => ({ ...previous, error: '主模型必须包含 provider/modelId；备用需完整填写或清空禁用。' }))
+        return
+      }
+      pending = { runId: editor.target.runId, role: editor.role, expectedRevision: editor.baseline.revision,
+        requestId: crypto.randomUUID(), primary: modelRouteOf(primary), ...(fallback.provider ? { fallback: modelRouteOf(fallback) } : {}) }
+    }
+    const epoch = editorEpoch.current
+    savingRequest.current = { epoch, requestId: pending.requestId }
+    setModelEditor(previous => ({ ...previous, pending, saving: true, unknown: false, error: '', notice: '' }))
+    let result
+    try { result = await configRpcRef.current('model-config-save', pending) }
+    catch (error) { result = { ok: false, error: { code: 'editor/transport', message: String(error) } } }
+    if (savingRequest.current?.requestId === pending.requestId) savingRequest.current = null
+    if (epoch !== editorEpoch.current) return
+    // 不让较早的轮询读取覆盖这次保存返回的最新配置。
+    readEpoch.current += 1
+    setModelEditor(previous => {
+      if (previous === null || previous.pending?.requestId !== pending.requestId) return previous
+      if (!result.ok) {
+        const code = result.error?.code ?? ''
+        const unknown = /timeout|transport|cancelled|save-failed/.test(code)
+        const latest = result.error?.details?.latest
+        return { ...previous, saving: false, unknown, pending: unknown ? pending : null,
+          ...(latest?.runId === pending.runId ? { latest } : {}), error: result.error?.message ?? '模型保存失败；草稿已保留。' }
+      }
+      const latest = result.value
+      if (latest.runId !== pending.runId || latest.workspaceKey !== previous.target.workspaceKey) {
+        return { ...previous, saving: false, unknown: true, error: '保存响应目标不匹配；结果未知，请重传同一次更新。' }
+      }
+      const baseline = latest.roles.find(role => role.role === pending.role)
+      return { ...previous, latest, baseline, draft: modelDraftOf(baseline), saving: false, pending: null, unknown: false,
+        error: '', notice: '已保存：下次新派发生效；当前已登记派发保持原模型。' }
+    })
+  }
+  const modelActions = {
+    targetMatches: modelEditor?.target.runId === returnedRunId,
+    returnTarget: () => setSelection({ cwd, runId: editorRef.current.target.runId }),
+    close: () => leaveEditor({ kind: 'close' }), role: chooseRole,
+    field: (kind, patch) => setModelEditor(previous => ({ ...previous, draft: { ...previous.draft, [kind]: { ...previous.draft[kind], ...patch } }, error: '', notice: '' })),
+    save: () => { void saveModels(false) }, retry: () => { void saveModels(true) },
+    rebase: () => setModelEditor(previous => ({ ...previous, baseline: previous.latest.roles.find(role => role.role === previous.role), error: '', notice: '已确认最新版本；本地草稿保留，请主动更新。' })),
+    reloadModels: () => setCatalogRevision(value => value + 1),
+    stay: () => setModelEditor(previous => ({ ...previous, leave: null })),
+    discard: () => {
+      const action = editorRef.current.leave
+      if (action.kind === 'role') {
+        const baseline = editorRef.current.latest.roles.find(role => role.role === action.role)
+        setModelEditor(previous => ({ ...previous, role: action.role, baseline, draft: modelDraftOf(baseline), error: '', notice: '', leave: null }))
+      } else {
+        editorEpoch.current += 1
+        setModelEditor(null)
+        if (action.kind === 'run') setSelection({ cwd, runId: action.runId })
+      }
+    },
+  }
   // 实际返回的 Run 变化（新 Run / 切目录 / 刷新到别的 Run）：跟随与手动流程选择回到默认。
   useEffect(() => { setFollow(initialFollowState()) }, [returnedRunId, cwd])
   // 换 Run/换目录时收起旧 Run 的下钻，避免同名节点行在新 Run 里意外展开。
@@ -363,7 +571,7 @@ export function WorkflowMonitorTab({ fetchStatus, visible = true, scope }) {
     '运行：',
     h('select', {
       value: selectedRunId ?? '',
-      onChange: event => setSelection({ cwd, runId: event.target.value === '' ? null : event.target.value }),
+      onChange: event => leaveEditor({ kind: 'run', runId: event.target.value === '' ? null : event.target.value }),
       'aria-label': '切换运行',
     },
     h('option', { value: '' }, '当前目录（默认）'),
@@ -377,8 +585,10 @@ export function WorkflowMonitorTab({ fetchStatus, visible = true, scope }) {
       view.run.businessReturn ? h('span', { className: 'wf-monitor-return-value' }, `返回：${view.run.businessReturn}`) : null,
       view.terminalNote ? h('span', { className: 'wf-monitor-terminal-note' }, view.terminalNote) : null,
     ) : null,
+    hasRun ? h('button', { type: 'button', disabled: modelEditor !== null || typeof configRpc !== 'function', onClick: openModels }, '模型配置') : null,
     refreshEl)
-  const frame = (...children) => h('div', { className: 'wf-monitor' }, styleEl, bannerEl, toolbarEl, ...children)
+  const frame = (...children) => h('div', { className: 'wf-monitor' }, styleEl, bannerEl, toolbarEl,
+    modelEditorEl(modelEditor, modelCatalog, modelActions), ...children)
   if (view.mode === 'loading') {
     return frame(h('div', { className: 'wf-monitor-muted' }, '正在加载运行状态…'))
   }

@@ -107,7 +107,7 @@ Role（含 judgeRole）的模型路由由 provider、modelId 与可选思考强�
 
 本地模型列表（Local Model Catalog）是当前 profile 实际声明的模型集合：适配器内置目录与 settings/config 显式声明合并而成，与供应商接口的动态发现无关。modelId 本地列表校验与档位支持矩阵按 #149 执行（含明确的 fail-open 跳过维度与 start 前置阻断，由 T2/T3 交付）；基线空列表按不可用处理，unlisted 阻断为有意严格策略。
 
-## Run 模型配置术语（#287 运行期实施，人类编辑另票）
+## Run 模型配置术语（#287 运行期 / #288 人类编辑）
 
 **Run Model Configuration（Run 模型配置）**：仅属于某个 Run 的普通 Role 或 Judge 的主模型与可选备用模型组合，各路由具有独立思考强度；不属于 Manager 主会话，也不等于工作流模板配置。
 
@@ -115,7 +115,7 @@ Role（含 judgeRole）的模型路由由 provider、modelId 与可选思考强�
 
 _Avoid_: 用“当前模型”混称 Run 模型配置、待生效配置与已实派路由。
 
-固定 Manager 保存普通 Role/Judge 的当前主模型，保留最新备用；新登记派发才消费新配置，已登记未发送派发仍用旧快照。模型切换不等于会话替换；保留原 Session 与规范化上下文不代表绕过正常压缩或保证 provider 原生状态兼容。人类完整主备编辑不在 #287 范围，设计见[监控与 Run 模型配置设计](docs/pending-discussions/run-monitor-layout-and-model-config.md)。
+固定 Manager 保存普通 Role/Judge 的当前主模型，保留最新备用；通过宿主浏览器身份校验的人可原子更新明确选中未结束 Run 的完整主备。新登记派发才消费新配置，已登记未发送派发仍用旧快照。模型切换不等于会话替换；保留原 Session 与规范化上下文不代表绕过正常压缩或保证 provider 原生状态兼容。配置版本用于并发冲突，保存请求标识用于重传去重；它们不构成配置审计历史。每次主动更新是独立授权，同次请求的重传不是新一轮授权。设计见[监控与 Run 模型配置设计](docs/pending-discussions/run-monitor-layout-and-model-config.md)。
 
 ## 已确认的 Fallback 领域术语（#235–#237 已落地 Runtime）
 

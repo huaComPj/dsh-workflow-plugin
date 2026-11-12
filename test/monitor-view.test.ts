@@ -84,10 +84,10 @@ test('#252 monitorViewModel：运行图模型（节点 decoration/布局/子流�
 test('#262 图卡生效模型：主/子流程、未执行节点同一规则，Program/Child 不伪造', () => {
   const graph = monitorViewModel(RUN_PAYLOAD).run.graph
   const [main, sub] = graph.flows
-  // 已执行与未执行节点都取冻结图的「当前生效模型」（不冒充历史实际调用模型）。
+  // 已执行与未执行节点均显式标识解析配置，不冒充历史实际调用模型。
   assert.deepEqual(main.def.nodes.plan.execution, { type: 'actor-task', role: 'manager' })
-  assert.equal(main.decorations.plan.summary, 'prov/m-plan')
-  assert.equal(main.decorations.review.summary, 'prov/m-review')
+  assert.equal(main.decorations.plan.summary, '配置模型：prov/m-plan')
+  assert.equal(main.decorations.review.summary, '配置模型：prov/m-review')
   // Program/Child 只保留程序/子流程目标，不追加 Actor 模型。
   assert.equal(main.decorations.report?.summary, undefined)
   assert.equal(main.decorations.child?.summary, undefined)
@@ -99,20 +99,20 @@ test('#262 图卡生效模型：主/子流程、未执行节点同一规则，Pr
   const withSubModel = structuredClone(RUN_PAYLOAD)
   withSubModel.run.flows.sub.nodes[0].model = { provider: 'prov', modelId: 'm-sub' }
   const subDecor = monitorViewModel(withSubModel).run.graph.flows[1].decorations.s1
-  assert.equal(subDecor.summary, 'prov/m-sub')
+  assert.equal(subDecor.summary, '配置模型：prov/m-sub')
   assert.equal(subDecor.badge, undefined)
 
   // 服务端 override/fallback 的新 payload 到达即替换旧文本；客户端只呈现，不自行推导优先级。
   const overridden = structuredClone(RUN_PAYLOAD)
   overridden.run.flows.test.nodes[1].model = { provider: 'prov2', modelId: 'm-review-b', reasoningEffort: 'high' }
-  assert.equal(monitorViewModel(overridden).run.graph.flows[0].decorations.review.summary, 'prov2/m-review-b')
+  assert.equal(monitorViewModel(overridden).run.graph.flows[0].decorations.review.summary, '配置模型：prov2/m-review-b')
 
   // provider/modelId 部分缺席：只渲染存在的段，不补假值。
   const partial = structuredClone(RUN_PAYLOAD)
   partial.run.flows.test.nodes[0].model = { modelId: 'm-only' }
   partial.run.flows.test.nodes[1].model = {}
   const partialMain = monitorViewModel(partial).run.graph.flows[0]
-  assert.equal(partialMain.decorations.plan.summary, 'm-only')
+  assert.equal(partialMain.decorations.plan.summary, '配置模型：m-only')
   assert.equal(partialMain.decorations.review.summary, undefined)
 })
 

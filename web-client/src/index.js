@@ -23,6 +23,7 @@ export const PANEL_KEY = 'workflow-config-editor'
 
 /** #251 运行监控 tab：通道与 tab id（独立于编辑器通道，ADR-0005）。 */
 export const MONITOR_RPC_CHANNEL = '/workflow-run-monitor'
+export const MODEL_CONFIG_RPC_CHANNEL = '/workflow-run-model-config'
 export const MONITOR_TAB_ID = 'dsh-workflow:monitor'
 
 /** 对话输入工具区启动按钮注册（session-scoped list，不替换 composer）。 */
@@ -84,7 +85,8 @@ export function apply(ctx) {
         id: MONITOR_TAB_ID,
         title: '工作流监控',
         description: '运行状态、节点进度与子流程下钻',
-        component: (props) => WorkflowMonitorTab({ ...props, fetchStatus: runId => fetchStatus(props?.scope, runId) }),
+        component: (props) => WorkflowMonitorTab({ ...props, fetchStatus: runId => fetchStatus(props?.scope, runId),
+          configRpc: (endpoint, payload) => callChannel(ctx.connection, MODEL_CONFIG_RPC_CHANNEL, endpoint, payload), loadModels }),
       })
     })
   }
