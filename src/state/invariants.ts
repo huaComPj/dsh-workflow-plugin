@@ -14,7 +14,7 @@ const route = z.object({ provider: text.optional(), modelId: text.optional(), re
 //（投影显示未记录/来源未知，绝不回填当前配置）。
 const dispatch = z.object({
   id: text, sessionId: text.optional(), messageId: text.optional(), settled: z.boolean(),
-  model: route.optional(), source: z.enum(ROLE_ROUTE_STAGES).optional(),
+  model: route.optional(), source: z.enum(ROLE_ROUTE_STAGES).optional(), configRevision: revision.optional(),
 }).strict()
 const judge = dispatch.extend({ sessionId: text, claimId: text, inputVersion: revision, model: route.optional() })
 // v3: claim 携带一个已声明的节点结果名（result），不再有 outcome。
@@ -37,6 +37,10 @@ const runSchema = z.object({
     reason: z.string().max(LIMITS.blockReasonMax).optional(),
     autoSwitches: z.number().int().nonnegative().optional(),
   }).strict()).optional(),
+  roleModelConfigs: z.record(z.string(), z.object({
+    primary: model, fallback: model.optional(), revision,
+  }).strict()).optional(),
+  modelConfigRevision: revision.optional(),
   // v3: 已确认的业务终局（名字 + 终局来源 executionId）；handoff 不做第二份镜像。
   businessReturn: z.object({ name: z.string().regex(ID_PATTERN), source: text }).strict().optional(),
 }).strict()
@@ -206,6 +210,7 @@ export function checkStateInvariants(run: RunState, execution?: NodeExecution): 
   const routeKeys = new Set(roleKeysWithJudge(run.definitionSnapshot))
   for (const key of Object.keys(run.modelOverrides)) if (!routeKeys.has(key)) problems.push(`unknown modelOverrides key: ${key}`)
   for (const key of Object.keys(run.roleRoutes ?? {})) if (!routeKeys.has(key)) problems.push(`unknown roleRoutes key: ${key}`)
+  for (const key of Object.keys(run.roleModelConfigs ?? {})) if (!routeKeys.has(key)) problems.push(`unknown roleModelConfigs key: ${key}`)
   if (execution) {
     problems.push(...checkExecutionInvariants(run, execution))
     if (run.status === 'blocked' && !(run.blockReason?.trim() || execution.blockReason?.trim())) problems.push('blocked run requires a control or execution reason')

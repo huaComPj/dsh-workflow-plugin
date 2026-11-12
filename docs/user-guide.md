@@ -95,10 +95,11 @@ worker Role 可选 `reuse: node | continuable`，决定该 Role 的会话在节�
 
 - **新 Run**：`/dsh-flow start` 时按 DSH 正式的委派语义取源——Manager 会话最新
   request header 的 provider/model 优先，创建该会话时的 options 兜底——冻结值随
-  Run 一起持久化，宿主重启后照旧生效。此后为该 Run 新建的 Role Actor、Judge 会话，
-  以及 `reuse: continuable` 的跨节点边界 compact fallback，一律只读这条冻结值。
-- **优先级不变**：`workflow_set_role_model` 的 override > catalog 中 Role/Judge 的
-  `model:` 块 > 本 Run 的冻结值 > 宿主 spawn 时按 Manager 继承。
+  Run 一起持久化，宿主重启后照旧生效。未主动更新角色时，后续派发及 `reuse: continuable` 边界 compact fallback
+  仍以此冻结值作为未显式配置角色的默认路由。
+- **有效路由**：已主动更新的角色读取该 Run 的当前主备配置与激活阶段；未更新角色
+  读取 catalog 的 `model:`、再回落本 Run 冻结值。旧 Run 缺冻结值时才交宿主继承。
+  因此切到当前备用后不会被仍保存的主模型覆盖（#287）。
 - **不追溯已有会话**：冻结只影响之后创建的会话；Run 中途 Manager 会话换了模型，
   不会改写已存在 Role/Judge 会话自己的路由，也不会把它们算到别的 Run 上。
 - **旧 Run**（升级前已存在、状态行里没有该字段）：不推测历史值，也**不借用**其他
@@ -135,7 +136,7 @@ roles:
   判定矩阵见 §5）：只有 `modelId` 已在本地列表确认且配置了档位才查思考
   元数据；档位越界或模型无 reasoning 元数据（宿主对此类带档位请求必然
   抛 `UNSUPPORTED_REASONING_EFFORT`）会阻断 `start`；元数据查询失败则
-  fail-open 跳过档位维并在行内注明。运行期换模型清空档位（T4）待后续票据。
+  fail-open 跳过档位维并在行内注明。运行期主动设置省略档位的行为见 §7。
 
 ### 3.4 角色备用模型 `fallbackModel`（#235 / Judge 自 #236 起）
 
@@ -179,24 +180,19 @@ judgeRole:
   REJECT/NEED_CONTEXT 本身都不是切换依据；compact、会话物化、插件派发
   失败也不换模。插件不额外重试主模型、不加 watchdog、不改宿主的重试策略，
   也不强杀正在重试的请求；已接受的 claim/judgment 不会被撤销。
-- **切换链**：主模型 A →（合格故障）备用 B →（B 也合格故障）BLOCK。Manager
-  每次用 `workflow_set_role_model` 显式设置模型 C 都会开一个**新一轮**：
-  C →（合格故障）回主模型 A →（A 再合格故障）才升 B → BLOCK；C 与 A/B 相同
-  也允许，不因路由值相同静默丢掉授权（#237，普通角色与 Judge 同规则）。A/B
-  始终取自本 Run 最初冻结的主/备用路由，人工 C 与运行中改 YAML 都不改写它们。
-  只有**再次成功的人工设置**才重置这个预算：`node_resume`、自动切换与关库重开
-  **都不刷新**；已经切到 B 的角色被人工指定 C 后，C 的合格故障回到原始 A，
-  A 再失败才用 B，B 再失败 BLOCK（不自动回 C/A）。切到 B 成功后本 Run 该角色
-  一直保持 B，不自动回切，也不改 catalog；新 Run 从 A 重新开始。
-- **Judge 专用语义**（#236）：配置了 Judge 备用路由时，判定中的合格故障且已
-  安全收口后**直接切 B**，不再先叠加 #200 的同主模型 fresh 重试；新 Judge 继续
-  判定**同一个 claim**（材料、冻结 criteria、`inputVersion` 都不变，不补做 Actor
-  的工作），旧 Judge 会话只撤权、不在它自己的判定调用里 drain 自己。B 再失败
-  直接 BLOCK，不追加插件级重试、不回到 A。**未配置** Judge 备用路由的 Run 完全
-  保留原有行为（瞬时失败同模型重试一次，再失败 BLOCK）。Judge 的人工轮次与普通
-  角色相互独立（#237）：对 Judge 显式设置 C 同样开启 C → A → B → BLOCK，且
-  Judge 没有会话映射，设置不会替换正在跑的判定——授权从下一次派发生效。已接受
-  的 judgment 不撤销、不重复判定；迟到提交与重复通知不会二次消耗预算。
+- **当前 Run 的切换链（#287）**：固定 Manager 用 `workflow_set_role_model` 设置 C，
+  会把 C 保存为该角色的当前主模型，保留最新备用 B。C 合格失败才切 B；随后新派发
+  保持 B，B 再合格失败则 BLOCK，**不回最初冻结的 A**。每次成功的主动设置（同值
+  或只改档位也算）递增配置版本，并使之后新登记派发从最新主模型重开一轮。
+  普通 resume、后续节点、关库重开都不刷新预算；无备用不凭空选别的模型。
+- **旧派发与新配置分离**：保存不推进工作单、不解除 BLOCK，也不改冻结定义、hash
+  或历史派发事实。已经登记但尚未发送的派发仍用登记的模型/档位；旧 A 在途时保存 C，
+  A 合格失败后的新派发先用 C，不把尚未实派的 C 算作失败，不消耗新链的备用机会。
+- **Judge 独立恢复**：普通 Role 与 Judge 分别记录配置与预算。Judge 切换后继续判
+  同一个 claim，保留材料、criteria、inputVersion；可安全复用时沿用同一 durable
+  Session，不因换模额外 fresh。无备用时保留原有瞬时故障同模型重试一次的语义。
+  原有独立 Judge 生命周期、显式 respawn、安全收口与迟到提交门禁不变，已接受
+  judgment 不撤销、不重复判定。不会在 Judge 自己的提交 turn 内 drain 自己。
 - **切换后先核验外部副作用**（普通角色）：安全收口只保证旧执行不再活动，并不
   回滚它已做的外部操作（推送分支、合并 PR、改远端/文件、触发下游任务）。因此
   切换到备用后的新执行会收到 `[模型故障切换]` 段，明确要求**先用工具核验已执行
@@ -330,7 +326,7 @@ instruction**（结果验收条件进各结果 `criteria`，不依赖 persona �
 | `node_resume` | Manager | 恢复 BLOCK 节点（target=auto/actor/judge，轮换新 nodeToken） |
 | `node_run_program` | Manager | 为 builtin-program 节点提交 typed parameters 并运行 |
 | `node_resolve_program` | Manager | BLOCK 的 program 节点现场检查后手工提交 PASS/FAIL |
-| `workflow_set_role_model` | Manager | 给某 Role / Judge 切换模型（可选 `reasoningEffort` 显式档位；省略即清空旧档位，后续派发用目标模型默认；有活动 Actor 时拒绝；只影响之后新建的会话，Judge 覆盖后 `node_resume` 自动对旧会话走 fresh） |
+| `workflow_set_role_model` | Manager | 保存当前 Run 普通 Role / Judge 的主模型并保留备用；允许活动 Role，下一次新登记派发生效；保留可复用 Session，省略 `reasoningEffort` 即模型默认；每次主动设置重开有限轮次 |
 | `judge_respawn` | Manager | 重建当前节点的 Judge（drain 旧的 + spawn 新的；Judge 模型覆盖后也可直接 `node_resume`，见 §7） |
 | `judge_claim` | Judge | 提交判定 ACCEPT/REJECT/NEED_CONTEXT（必须是本轮最后动作） |
 | `workflow_inspect_git` / `workflow_inspect_github` | Judge | 只读检查 git / GitHub 现场 |
@@ -370,24 +366,17 @@ GitHub 列表按 `per_page=100` 翻页取全、PR 从 issues 结果中排除；�
   compactNow → dispose），token 得以受控但派发前有额外时延。
 - BLOCK：Actor 主动 `node_block`，或技术故障（Judge fault 等）自动进入；
   Manager 用 `node_resume` 恢复。
-- 模型热更新的生效语义（Issue #22）：`workflow_set_role_model` 只影响之后
-  新建的会话，正在运行的 live 会话不受影响。Worker 覆盖即删旧映射（下次派发
-  按新路由重建）；Judge 覆盖后 `node_resume` 在复用旧会话前比对该会话创建时
-  的绑定路由——已过期则自动走 fresh（释放旧会话 + 按新路由 spawn），不再把
-  同一个失败（如旧模型额度耗尽）再派一次。典型恢复：Judge 旧模型额度耗尽 →
-  覆盖为新模型 → 直接 `node_resume`（target=judge），无需先 `judge_respawn`。
-- 思考强度（Issue #153 T4，#172 扩展显式档位）：`workflow_set_role_model`
-  支持可选 `reasoningEffort`——显式档位随 override 落库，后续新建/重建会话
-  使用该档位；省略即清空该角色原有效档位（catalog/override 配置的与继承来
-  的旧值都不再携带），后续派发使用目标模型默认——换到与 Manager 相同的路由
-  不重新继承 Manager 显式档位，同模型再次设置同样清空（无档位时）。档位 id
-  是适配器自有 opaque 字符串，只做 trim/非空/长度校验，不 hardcode 跨 provider
-  枚举；非法值直接拒绝且不留部分覆盖，目标模型不支持则在后续派发时由宿主报错。
-  Worker 有存活会话时，同模型覆盖同样走替换重建（仅 override 三元件全等才算
-  "无变化"）；Judge 旧 high 会话在 `node_resume` 比对出路由（含档位）变化后走
-  fresh。生效点都是之后新建的会话，正在运行的 live 会话仍不受影响（目标 Role
-  有 active Actor 时 set 直接拒绝）。清空只保证不再携带旧档位，不解决目标模型
-  自身的不可用、凭据或网络问题。
+- **模型更新生效点（#287）**：固定 Manager 可在普通 Role 活动时保存下次派发配置，
+  不要求先 BLOCK，不中断旧 turn、不删会话映射；更新后新登记的 Dispatch 才使用新主。
+  新建、同 Session 热复用、Judge followup 与冷物化都消费该次登记的模型快照。
+  保存与回执交错不使原派发身份失效，也不能让旧 Run 副本覆盖新配置。
+- **档位与上下文**：显式 `reasoningEffort` 独立保存；省略即目标模型默认，清除旧
+  显式/继承档位，同值设置也生效。经正式 Host scoped 模型选择，在下一次安全放行
+  前应用，保留 Session ID 与宿主规范化上下文。正常 `reuse: node` 离开节点的
+  drain、`continuable` 边界 compact、owner 校验和独立 Judge 判定不变。
+  不承诺保留全部未压缩历史、provider 原生缓存或推理状态；目标 provider 的消息能力
+  （thinking/signature/tool ID、多模态、上下文上限等）仍须针对实际组合验证。
+  脚本化适配器测试只能证明 Host 选择/排队/持久化合同，不能证明任意 provider 兼容。
 - Host 重启后 Run 可冷恢复：状态在 SQLite，会话在持久层，重进即可续跑。
 
 ## 8. v3 升级与回滚（停机切换）

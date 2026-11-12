@@ -602,7 +602,7 @@ test('#274 当前执行卡：投影 → 视图模型（角色/模型来源/状�
     assert.ok(review.nodes.some(node => node.executionId === reviewRow.execution.executionId), '节点行携带 execution 身份')
 
     // 结束 Run：卡片改为结束位置，活动文案不再冒充正在执行。
-    h.engine.handleReset('ws', 'manager')
+    await h.engine.handleReset('ws', 'manager')
     const terminated = monitorViewModel((await handler('status', { cwd: 'ws' })).value)
     assert.equal(terminated.currentExecution!.heading, '结束位置')
     assert.equal(terminated.currentExecution!.active, false)

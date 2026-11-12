@@ -107,7 +107,7 @@ Role（含 judgeRole）的模型路由由 provider、modelId 与可选思考强�
 
 本地模型列表（Local Model Catalog）是当前 profile 实际声明的模型集合：适配器内置目录与 settings/config 显式声明合并而成，与供应商接口的动态发现无关。modelId 本地列表校验与档位支持矩阵按 #149 执行（含明确的 fail-open 跳过维度与 start 前置阻断，由 T2/T3 交付）；基线空列表按不可用处理，unlisted 阻断为有意严格策略。
 
-## 已确认的 Run 模型配置术语（设计中，尚未实施）
+## Run 模型配置术语（#287 运行期实施，人类编辑另票）
 
 **Run Model Configuration（Run 模型配置）**：仅属于某个 Run 的普通 Role 或 Judge 的主模型与可选备用模型组合，各路由具有独立思考强度；不属于 Manager 主会话，也不等于工作流模板配置。
 
@@ -115,7 +115,7 @@ Role（含 judgeRole）的模型路由由 provider、modelId 与可选思考强�
 
 _Avoid_: 用“当前模型”混称 Run 模型配置、待生效配置与已实派路由。
 
-本节是下一版已确认设计术语，不改写下方现行实现合同；派发生效边界、主备延续、原会话换模及人类写入范围见[监控与 Run 模型配置设计](docs/pending-discussions/run-monitor-layout-and-model-config.md)。模型切换不等于会话替换；保留原 Session 与上下文不代表绕过正常上下文压缩。
+固定 Manager 保存普通 Role/Judge 的当前主模型，保留最新备用；新登记派发才消费新配置，已登记未发送派发仍用旧快照。模型切换不等于会话替换；保留原 Session 与规范化上下文不代表绕过正常压缩或保证 provider 原生状态兼容。人类完整主备编辑不在 #287 范围，设计见[监控与 Run 模型配置设计](docs/pending-discussions/run-monitor-layout-and-model-config.md)。
 
 ## 已确认的 Fallback 领域术语（#235–#237 已落地 Runtime）
 
@@ -125,11 +125,11 @@ _Avoid_: 用“当前模型”混称 Run 模型配置、待生效配置与已实
 
 **Automatic Model Failover（自动模型故障切换）**：用户通过显式配置备用路由，预先授权在确认模型调用故障且满足安全恢复条件时改用该路由。未配置备用路由不构成自动选模授权；业务结果不符合验收条件不等于模型调用故障。
 
-**Model Recovery Cycle（模型恢复轮次）**：一次获授权的有限模型故障恢复过程，授权来自 Run 的显式备用配置或 Manager 的再次人工设置。自动切换、普通恢复与进程重启不构成新一轮授权。「再次人工设置」对 Role Actor 与 Judge 同规则（#237）：C 与 A/B 相同也开新一轮，只有当前已在人工阶段（stage=manual、预算 0）且路由三元件相同时才算无需变更。人工阶段的激活路由、来源与预算记在 `run.roleRoutes`（持久化，node_resume/重启不刷新）。
+**Model Recovery Cycle（模型恢复轮次）**：一次获授权的有限模型故障恢复过程。每次成功的主动设置（包括同值或仅改档位）让后续新派发从最新主模型重开一轮；新主合格失败才切当前备用，之后保持备用直至再次主动设置。普通恢复、后续节点与进程重启不构成新授权。Role 与 Judge 的轮次相互独立；不隐式回到最初冻结主模型。
 
-**已实派路由 / 未实派人工路由（Dispatched Route / Undispatched Manual Route）**：切换素材里的来源只写“这次失败派发实际走过的路由”。人工设置只授权下一次派发、不替换在途派发，因此该在途派发失败时来源标为「人工路由未实派」，而不是刚设置、从未运行的 C（#243）。实派身份按路由三元件全等比较：同 provider+modelId 但档位不同的 C 也是另一条路由，不得当作同一次派发豁免。
+**Dispatch Model Snapshot（派发模型快照）**：某次已登记派发固定的模型、档位与所属配置修订，不等于之后保存的 Run 模型配置。旧 A 在途时保存 C，来源仍归实际 A；A 合格失败后首派 C 不扣新轮备用机会。历史快照不因保存、回执或重新打开状态而改写。
 
-以上概念已在 #235（Actor 备用链）、#236（Judge 备用链）与 #237（人工换模新轮次）落地；备用配置仅随新 Run 的 Definition Snapshot 生效，不通过编辑配置追改在途 Run。已确认的行为边界见[单备用模型故障切换规格](docs/specs/role-model-fallback.md)，授权与安全取舍见 [ADR-0004](docs/adr/0004-role-model-fallback-authorization.md)。
+故障资格与安全收口仍沿用 #235/#236；#287 替代 #237/#243 的 C→冻结 A→B 与“未实派人工路由”旧链语义。现行运行行为见[用户手册](docs/user-guide.md)，旧设计授权取舍保留在 [ADR-0004](docs/adr/0004-role-model-fallback-authorization.md)。
 
 ## Judge Role / Judge Agent
 

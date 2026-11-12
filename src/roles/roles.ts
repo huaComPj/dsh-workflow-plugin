@@ -11,7 +11,7 @@
  * The three enforcement layers (spawn filter here, spawn assertion in host.ts,
  * runtime gate in tools/authz.ts) all derive from this one source.
  */
-import { readRoleDefModel, readRoleFallbackModel, type DelegationRoute, type RoleRouteStage, type RunState } from '../types.ts'
+import { readRoleDefModel, readRoleFallbackModel, type DelegationRoute, type RoleModelConfig, type RoleRouteStage, type RunState } from '../types.ts'
 import { ROLE_ACTOR_SUBMISSION_PROTOCOL } from '../engine/texts.ts'
 
 /**
@@ -93,17 +93,27 @@ export function effectiveRoleRouteStage(run: RunState, roleKey: string): RoleRou
   return run.modelOverrides[roleKey] === undefined ? 'primary' : 'manual'
 }
 
-/** #235：角色配置的备用路由（未配置即 undefined——此时不引入任何人工恢复链）。 */
+/** #287：缺席的 Run 配置只读回退到冻结定义，不补写配置或历史派发。 */
+export function roleModelConfig(run: RunState, roleKey: string, frozen: DelegationRoute | undefined = run.delegationRoute): RoleModelConfig {
+  const saved = run.roleModelConfigs?.[roleKey]
+  if (saved !== undefined) return saved
+  const fallback = readRoleFallbackModel(run.definitionSnapshot, roleKey)
+  return { primary: readRoleDefModel(run.definitionSnapshot, roleKey) ?? frozen ?? {},
+    ...(fallback === undefined ? {} : { fallback }), revision: 0 }
+}
+
+/** 角色配置的备用路由；已保存配置省略备用时不得回到冻结定义中的旧备用。 */
 export function roleFallbackRoute(run: RunState, roleKey: string): DelegationRoute | undefined {
-  return readRoleFallbackModel(run.definitionSnapshot, roleKey)
+  const saved = run.roleModelConfigs?.[roleKey]
+  return saved === undefined ? readRoleFallbackModel(run.definitionSnapshot, roleKey) : saved.fallback
 }
 
 /**
- * 主路由（忽略 override）：显式 catalog model，缺省回落到本 Run 冻结的默认路由。
+ * 主路由（忽略旧 override）：优先 Run 配置，否则 catalog model，再回落到冻结默认路由。
  * 启动期主备冲突检查与运行期「切到备用会不会是同一个模型」判定共用。
  */
 export function rolePrimaryRoute(run: RunState, roleKey: string, frozen?: DelegationRoute): DelegationRoute {
-  return readRoleDefModel(run.definitionSnapshot, roleKey) ?? frozen ?? {}
+  return run.roleModelConfigs?.[roleKey]?.primary ?? readRoleDefModel(run.definitionSnapshot, roleKey) ?? frozen ?? {}
 }
 
 /**
@@ -114,6 +124,8 @@ export function rolePrimaryRoute(run: RunState, roleKey: string, frozen?: Delega
  */
 export function resolveRoleModel(run: RunState, roleKey: 'judge' | string, frozen?: DelegationRoute): DelegationRoute {
   const stage = effectiveRoleRouteStage(run, roleKey)
+  const saved = run.roleModelConfigs?.[roleKey]
+  if (saved !== undefined) return stage === 'fallback' ? saved.fallback ?? saved.primary : saved.primary
   if (stage === 'fallback') {
     const fallback = roleFallbackRoute(run, roleKey)
     if (fallback !== undefined) return fallback

@@ -103,6 +103,12 @@ function harness(config: import('../src/types.ts').WorkflowConfig = CONFIG) {
   const compacts: string[] = []
   const lifecycle: string[] = []
   const puts: Array<{ roleActors: Record<string, string>; events: string[] }> = []
+  const roleRequests: Array<{ sessionId: string; model: import('../src/types.ts').DelegationRoute | undefined }> = []
+  let writeGate: { event: 'actor-arranged' | 'judge-arranged' | 'model-changed'; gate: Promise<void>; entered: () => void } | undefined
+  let roleQueueGate: { gate: Promise<void>; entered: () => void } | undefined
+  let judgeQueueGate: { gate: Promise<void>; entered: () => void } | undefined
+  let roleDrainGate: { gate: Promise<void>; entered: () => void } | undefined
+  let programRun: import('../src/engine/engine.ts').ProgramHost['run'] = async () => { throw new Error('T7') }
   let roleDrainFailure: Error | undefined
   let roleSerial = 0
   let safe = true
@@ -127,9 +133,27 @@ function harness(config: import('../src/types.ts').WorkflowConfig = CONFIG) {
     const messageId = `message-${messages.length + 1}`
     messages.push({ sessionId, messageId, text }); return { messageId }
   }
+  const queueRole = async (sessionId: string, text: string, model: import('../src/types.ts').DelegationRoute | undefined) => {
+    roleRequests.push({ sessionId, model: structuredClone(model) })
+    const waiting = roleQueueGate
+    roleQueueGate = undefined
+    if (waiting) { waiting.entered(); await waiting.gate }
+    return send(sessionId, text)
+  }
+  const waitJudgeQueue = async () => {
+    const waiting = judgeQueueGate
+    judgeQueueGate = undefined
+    if (waiting) { waiting.entered(); await waiting.gate }
+  }
   const stateHost = makeStateHost(store)
   const put = stateHost.put
   stateHost.put = async (ws, run, expectedVersion, changes) => {
+    const waiting = writeGate
+    if (waiting && changes.some(change => change.events.includes(waiting.event))) {
+      writeGate = undefined
+      waiting.entered()
+      await waiting.gate
+    }
     await put(ws, run, expectedVersion, changes)
     puts.push({ roleActors: structuredClone(run.roleActors), events: changes.flatMap(change => change.events) })
     const gate = boundaryPersistGate
@@ -142,24 +166,29 @@ function harness(config: import('../src/types.ts').WorkflowConfig = CONFIG) {
   }
   const engine = new WorkflowEngine({
     async steerManager(_run, text) { return send('manager', text) },
-    async sendRoleActor(run, role, text) { lifecycle.push(`send:${role}`); if (roleSendFailure) throw roleSendFailure; return send(run.roleActors[role]!, text) },
+    async sendRoleActor(run, role, text, model) { lifecycle.push(`send:${role}`); if (roleSendFailure) throw roleSendFailure; return queueRole(run.roleActors[role]!, text, model) },
     managerSessionSeq() { return 0 },
   }, {
     // 每次 fresh spawn 都是新 child：节点级复用（reuse: node）的「再次进入节点」必须可区分。
-    async ensureRoleActor(_run, _role, text) { const childId = roleSerial++ === 0 ? 'worker-session' : `worker-session-${roleSerial}`; return { ...send(childId, text), childId } },
-    async startJudge(_run, input) { judges.push(input); lastJudgeSession = input.judgeSessionId; if (judgeFailure) throw judgeFailure; return { ...send(input.judgeSessionId, 'Judge'), judgeSessionId: input.judgeSessionId } },
+    async ensureRoleActor(_run, _role, text, model) { const childId = roleSerial++ === 0 ? 'worker-session' : `worker-session-${roleSerial}`; return { ...await queueRole(childId, text, model), childId } },
+    async startJudge(_run, input) { judges.push(input); lastJudgeSession = input.judgeSessionId; if (judgeFailure) throw judgeFailure; await waitJudgeQueue(); return { ...send(input.judgeSessionId, 'Judge'), judgeSessionId: input.judgeSessionId } },
     async safeToInspect(sessionId) { lifecycle.push(`safe:${sessionId}`); if (safetyGate && gatedSession === sessionId) await safetyGate; if (sessionSafety) return sessionSafety; return safe && !unsafeSessions.has(sessionId) ? 'safe' : 'unsafe' },
     async retireJudge() {}, async drainJudge(_run, judgeSessionId) { drains.push(judgeSessionId); drainEntered?.(); if (drainGate) await drainGate; if (drainFailure) throw drainFailure },
-    async drainRoleActor(run, role) { roleDrains.push(run.roleActors[role]!); lifecycle.push(`drain:${role}`); if (roleDrainFailure) throw roleDrainFailure },
+    async drainRoleActor(run, role) { roleDrains.push(run.roleActors[role]!); lifecycle.push(`drain:${role}`); const waiting = roleDrainGate; roleDrainGate = undefined; if (waiting) { waiting.entered(); await waiting.gate }; if (roleDrainFailure) throw roleDrainFailure },
     async compactRoleActor(_run, role) { compacts.push(role); lifecycle.push(`compact:${role}`); compactEntered?.(); if (compactGate) await compactGate; return compactOutcome },
-    async followupJudge(_run, judgeSessionId, input) { followups.push(input); if (followupFailure) throw followupFailure; return send(judgeSessionId, 'Judge followup') },
+    async followupJudge(_run, judgeSessionId, input) { followups.push(input); if (followupFailure) throw followupFailure; await waitJudgeQueue(); return send(judgeSessionId, 'Judge followup') },
     async judgeSessionAvailability() { return 'available' as const },
     async roleSessionAvailability() { return 'available' as const },
-  }, { async run() { throw new Error('T7') } }, stateHost)
+  }, { run: (...args) => programRun(...args) }, stateHost)
   engine.cwdResolver = async () => home
   const caller = (dispatch: { sessionId?: string; messageId?: string }) => ({ sessionId: dispatch.sessionId!, turnUserMessageIds: new Set([dispatch.messageId!]) })
   return {
-    home, store, engine, messages, judges, followups, drains, roleDrains, compacts, lifecycle, puts, caller,
+    home, store, engine, messages, judges, followups, drains, roleDrains, compacts, lifecycle, puts, caller, roleRequests,
+    setWriteGate(event: 'actor-arranged' | 'judge-arranged' | 'model-changed', gate: Promise<void>, entered: () => void) { writeGate = { event, gate, entered } },
+    setRoleQueueGate(gate: Promise<void>, entered: () => void) { roleQueueGate = { gate, entered } },
+    setJudgeQueueGate(gate: Promise<void>, entered: () => void) { judgeQueueGate = { gate, entered } },
+    setRoleDrainGate(gate: Promise<void>, entered: () => void) { roleDrainGate = { gate, entered } },
+    setProgramRun(implementation: import('../src/engine/engine.ts').ProgramHost['run']) { programRun = implementation },
     setSafe(value: boolean | 'waiting') { if (value === 'waiting') { sessionSafety = 'waiting'; return } sessionSafety = undefined; safe = value === true; if (value) unsafeSessions.clear(); else for (const id of ['manager', 'worker-session', lastJudgeSession]) unsafeSessions.add(id) },
     setSessionUnsafe(sessionId: string, value: boolean) { if (value) unsafeSessions.add(sessionId); else unsafeSessions.delete(sessionId) },
     setCompactOutcome(value: { ok: boolean; detail?: string }) { compactOutcome = value },
@@ -235,6 +264,36 @@ test('Judge cwd preparation failure BLOCKs durably without losing the accepted c
     await h.engine.handleTurnEnded('ws', actor)
     assert.equal((await h.row()).stateVersion, blocked.stateVersion)
   } finally { h.close() }
+})
+
+test('#287: Judge preparation re-registers after a same-value config save instead of BLOCKing', async () => {
+  const h = harness()
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    await h.start()
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'p', 'judge-c', 'manager')).ok, true)
+    const actor = h.caller((await h.row()).execution.dispatch!)
+    await h.engine.handleClaim('ws', { result: 'succeeded', handoff: 'candidate survives configuration race' }, actor)
+    h.engine.cwdResolver = async () => { entered.resolve(); await release.promise; return h.home }
+    const pending = h.engine.handleTurnEnded('ws', actor)
+    await entered.promise
+    const preparing = await h.row()
+    assert.equal(preparing.execution.judge, undefined)
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'p', 'judge-c', 'manager')).ok, true)
+    const saved = await h.row()
+    assert.equal(saved.execution.revision, preparing.execution.revision, '配置保存不使工作单回执过期')
+    assert.equal(saved.run.roleModelConfigs?.judge?.revision, 2, '同值保存也标识新一轮授权')
+    release.resolve()
+    await pending
+    const dispatched = await h.row()
+    assert.equal(dispatched.run.status, 'running', '配置保存不是技术故障，不得因旧登记候选而 BLOCK')
+    assert.ok(dispatched.execution.judge?.messageId)
+    assert.equal(dispatched.execution.judge?.configRevision, 2)
+    assert.deepEqual(dispatched.execution.judge?.model, { provider: 'p', modelId: 'judge-c' })
+    assert.equal(dispatched.execution.claim?.id, preparing.execution.claim?.id)
+    assert.equal(h.judges.length, 1, '过期登记必须在 Host effect 前重读，不派发旧配置')
+  } finally { release.resolve(); h.close() }
 })
 
 test('late cwd preparation failure cannot BLOCK a newer Judge arrangement', async () => {
@@ -1983,6 +2042,324 @@ test('restart recovery settles only an exited ACCEPT predecessor Judge and conti
     await h.engine.handleTurnEnded('ws', oldJudgeCaller)
     assert.equal((await h.row()).run.status, 'running')
   } finally { h.close() }
+})
+
+/** #287：以下交错都经过真实 Engine/SQLite；Host 门只控制 await，不直接制造业务结果。 */
+function modelRaceConfig(reuse: 'node' | 'continuable' = 'continuable'): import('../src/types.ts').WorkflowConfig {
+  const config = configWithWorker('work', reuse)
+  config.roles.worker = { ...config.roles.worker, model: { provider: 'p', modelId: 'actor-a', reasoningEffort: 'low' }, fallbackModel: { provider: 'p', modelId: 'actor-b', reasoningEffort: 'high' } }
+  return config
+}
+
+test('#287: a configuration save during Host Queue keeps the old receipt and changes only the next dispatch', async () => {
+  const h = harness(modelRaceConfig())
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    await h.start()
+    const planJudge = await acceptCurrent(h, 'plan handoff')
+    h.setRoleQueueGate(release.promise, entered.resolve)
+    const pending = h.engine.handleTurnEnded('ws', planJudge)
+    await entered.promise
+    const arranged = await h.row()
+    assert.equal(arranged.execution.dispatch?.messageId, undefined)
+    assert.deepEqual(h.roleRequests.at(-1)?.model, { provider: 'p', modelId: 'actor-a', reasoningEffort: 'low' })
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'p', 'actor-c', 'manager', 'high')).ok, true)
+    assert.equal((await h.row()).execution.revision, arranged.execution.revision)
+    release.resolve()
+    await pending
+    const published = await h.row()
+    assert.equal(published.run.status, 'running')
+    assert.equal(published.execution.dispatch?.id, arranged.execution.dispatch?.id)
+    assert.ok(published.execution.dispatch?.messageId, '保存配置不能吞掉真实 Host 回执')
+    assert.equal(published.execution.dispatch?.configRevision, 0)
+    assert.deepEqual(published.execution.dispatch?.model, h.roleRequests[0]!.model)
+    assert.deepEqual(published.run.roleModelConfigs?.worker, {
+      primary: { provider: 'p', modelId: 'actor-c', reasoningEffort: 'high' },
+      fallback: { provider: 'p', modelId: 'actor-b', reasoningEffort: 'high' }, revision: 1,
+    })
+    const workerJudge = await acceptCurrent(h, 'old route still owns this result', 'failed')
+    await h.engine.handleTurnEnded('ws', workerJudge)
+    const next = await h.row()
+    assert.equal(next.execution.dispatch?.sessionId, published.execution.dispatch?.sessionId)
+    assert.equal(next.execution.dispatch?.configRevision, 1)
+    assert.deepEqual(h.roleRequests.at(-1)?.model, published.run.roleModelConfigs?.worker.primary)
+    assert.deepEqual(h.roleDrains, [], '仅换模型不释放仍可复用的会话')
+  } finally { release.resolve(); h.close() }
+})
+
+test('#287: a same-value save between Actor resolution and registration retries before any Host effect', async () => {
+  const h = harness(modelRaceConfig())
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    await h.start()
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'p', 'actor-c', 'manager')).ok, true)
+    const planJudge = await acceptCurrent(h)
+    h.setWriteGate('actor-arranged', release.promise, entered.resolve)
+    const pending = h.engine.handleTurnEnded('ws', planJudge)
+    await entered.promise
+    assert.equal(h.roleRequests.length, 0)
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'p', 'actor-c', 'manager')).ok, true)
+    release.resolve()
+    await pending
+    const row = await h.row()
+    assert.equal(row.run.status, 'running')
+    assert.equal(row.execution.dispatch?.configRevision, 2)
+    assert.ok(row.execution.dispatch?.messageId)
+    assert.equal(h.roleRequests.length, 1, '过期登记候选不得发送或生成第二个真实会话')
+    assert.deepEqual(h.roleRequests[0]?.model, { provider: 'p', modelId: 'actor-c' })
+  } finally { release.resolve(); h.close() }
+})
+
+test('#287: configuration changes during compact preserve the registered route and the newest configuration', async () => {
+  const h = harness(modelRaceConfig())
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    await h.start()
+    await h.engine.handleTurnEnded('ws', await acceptCurrent(h))
+    const workerJudge = await acceptCurrent(h, 'work before compact', 'failed')
+    h.setCompactGate(release.promise, entered.resolve)
+    const pending = h.engine.handleTurnEnded('ws', workerJudge)
+    await entered.promise
+    const arranged = await h.row()
+    assert.equal(arranged.execution.dispatch?.configRevision, 0)
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'p', 'actor-c', 'manager')).ok, true)
+    const savedCycle = (await h.row()).run.roleRoutes?.worker
+    release.resolve()
+    await pending
+    const row = await h.row()
+    assert.equal(row.run.status, 'running')
+    assert.equal(row.execution.dispatch?.id, arranged.execution.dispatch?.id)
+    assert.ok(row.execution.dispatch?.messageId)
+    assert.deepEqual(h.roleRequests.at(-1)?.model, { provider: 'p', modelId: 'actor-a', reasoningEffort: 'low' })
+    assert.equal(row.run.roleModelConfigs?.worker.primary.modelId, 'actor-c')
+    assert.deepEqual(row.run.roleRoutes?.worker, savedCycle)
+  } finally { release.resolve(); h.close() }
+})
+
+test('#287: another role configuration save cannot swallow a qualified fallback stage or overwrite its own new cycle', async () => {
+  const h = harness(modelRaceConfig())
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    await h.start()
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'p', 'actor-c', 'manager')).ok, true)
+    await h.engine.handleTurnEnded('ws', await acceptCurrent(h))
+    const before = await h.row()
+    h.setWriteGate('model-changed', release.promise, entered.resolve)
+    const pending = h.engine.handleTurnEnded('ws', h.caller(before.execution.dispatch!), 'upstream 503', { code: 'SERVER', status: 503 })
+    await entered.promise
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'p', 'judge-new', 'manager', 'high')).ok, true)
+    const savedJudgeCycle = (await h.row()).run.roleRoutes?.judge
+    release.resolve()
+    await pending
+    const row = await h.row()
+    assert.equal(row.run.status, 'running')
+    assert.equal(row.run.roleRoutes?.worker.stage, 'fallback')
+    assert.equal(row.run.roleRoutes?.worker.autoSwitches, 1)
+    assert.deepEqual(row.run.roleRoutes?.judge, savedJudgeCycle)
+    assert.deepEqual(row.run.roleModelConfigs?.judge.primary, { provider: 'p', modelId: 'judge-new', reasoningEffort: 'high' })
+    assert.equal(row.run.roleModelConfigs?.worker.primary.modelId, 'actor-c')
+    assert.deepEqual(h.roleRequests.at(-1)?.model, { provider: 'p', modelId: 'actor-b', reasoningEffort: 'high' })
+    assert.equal(row.execution.dispatch?.sessionId, before.execution.dispatch?.sessionId)
+  } finally { release.resolve(); h.close() }
+})
+
+test('#287: a configuration save during the Judge Host request keeps its receipt and same-Session followup', async () => {
+  const config = modelRaceConfig()
+  config.judgeRole.model = { provider: 'p', modelId: 'judge-a', reasoningEffort: 'low' }
+  const h = harness(config)
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    await h.start()
+    const actor = h.caller((await h.row()).execution.dispatch!)
+    await h.engine.handleClaim('ws', { result: 'succeeded', handoff: 'accepted candidate stays owned by old Judge request' }, actor)
+    h.setJudgeQueueGate(release.promise, entered.resolve)
+    const pending = h.engine.handleTurnEnded('ws', actor)
+    await entered.promise
+    const arranged = await h.row()
+    assert.equal(arranged.execution.judge?.messageId, undefined)
+    assert.deepEqual(h.judges.at(-1)?.model, { provider: 'p', modelId: 'judge-a', reasoningEffort: 'low' })
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'p', 'judge-c', 'manager')).ok, true)
+    release.resolve()
+    await pending
+    const published = await h.row()
+    assert.equal(published.run.status, 'running')
+    assert.ok(published.execution.judge?.messageId)
+    assert.equal(published.execution.judge?.id, arranged.execution.judge?.id)
+    assert.equal(published.execution.judge?.configRevision, 0)
+    assert.deepEqual(published.execution.judge?.model, { provider: 'p', modelId: 'judge-a', reasoningEffort: 'low' })
+    assert.equal(published.run.roleModelConfigs?.judge.primary.modelId, 'judge-c')
+    assert.equal((await h.engine.handleJudgeClaim('ws', published.execution.nodeToken, 'NEED_CONTEXT', 'Need the approved decision.', h.caller(published.execution.judge!))).ok, true)
+    const blocked = await h.row()
+    assert.equal((await h.engine.handleResume('ws', blocked.execution.nodeToken, 'The decision is confirmed.', 'manager', 'judge')).ok, true)
+    const followed = await h.row()
+    assert.equal(followed.execution.judge?.sessionId, published.execution.judge?.sessionId)
+    assert.equal(followed.execution.judge?.configRevision, 1)
+    assert.equal(followed.execution.claim?.id, published.execution.claim?.id)
+    assert.equal(h.judges.length, 1)
+    assert.equal(h.followups.length, 1)
+    assert.deepEqual(h.followups[0]?.model, { provider: 'p', modelId: 'judge-c' }, '新请求清除旧 effort，但不抹掉 Session 历史')
+  } finally { release.resolve(); h.close() }
+})
+
+test('#287: a same-role save racing Judge fallback stage re-evaluates the old failure without spending the new cycle', async () => {
+  const config = modelRaceConfig()
+  config.judgeRole.fallbackModel = { provider: 'p', modelId: 'judge-b' }
+  const h = harness(config)
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    await h.start()
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'p', 'judge-c', 'manager')).ok, true)
+    const actor = h.caller((await h.row()).execution.dispatch!)
+    await h.engine.handleClaim('ws', { result: 'succeeded', handoff: 'same candidate across old Judge failure' }, actor)
+    await h.engine.handleTurnEnded('ws', actor)
+    const before = await h.row()
+    h.setWriteGate('model-changed', release.promise, entered.resolve)
+    const pending = h.engine.handleTurnEnded('ws', h.caller(before.execution.judge!), 'old Judge cycle 503', { code: 'SERVER', status: 503 })
+    await entered.promise
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'p', 'judge-c', 'manager')).ok, true)
+    const saved = await h.row()
+    release.resolve()
+    await pending
+    const row = await h.row()
+    assert.equal(row.run.status, 'running')
+    assert.equal(row.run.roleRoutes?.judge.stage, saved.run.roleRoutes?.judge.stage)
+    assert.equal(row.run.roleRoutes?.judge.autoSwitches, 0, '旧 Judge 故障不扣新配置预算')
+    assert.equal(row.execution.judge?.configRevision, 2)
+    assert.equal(row.execution.judge?.sessionId, before.execution.judge?.sessionId)
+    assert.equal(row.execution.claim?.id, before.execution.claim?.id)
+    assert.equal(row.execution.inputVersion, before.execution.inputVersion)
+    assert.equal(h.judges.length, 1, '旧配置失败不 fresh 掉原 Judge Session')
+    assert.equal(h.followups.length, 1)
+    assert.deepEqual(h.followups[0]?.model, { provider: 'p', modelId: 'judge-c' })
+  } finally { release.resolve(); h.close() }
+})
+
+test('#287: a same-role save racing fallback stage re-evaluates the old failure without spending the new cycle', async () => {
+  const h = harness(modelRaceConfig())
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    await h.start()
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'p', 'actor-c', 'manager')).ok, true)
+    await h.engine.handleTurnEnded('ws', await acceptCurrent(h))
+    const before = await h.row()
+    h.setWriteGate('model-changed', release.promise, entered.resolve)
+    const pending = h.engine.handleTurnEnded('ws', h.caller(before.execution.dispatch!), 'old cycle 503', { code: 'SERVER', status: 503 })
+    await entered.promise
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'p', 'actor-c', 'manager')).ok, true)
+    const saved = await h.row()
+    assert.equal(saved.run.roleModelConfigs?.worker.revision, 2)
+    release.resolve()
+    await pending
+    const row = await h.row()
+    assert.equal(row.run.status, 'running')
+    assert.equal(row.run.roleRoutes?.worker.stage, saved.run.roleRoutes?.worker.stage)
+    assert.equal(row.run.roleRoutes?.worker.autoSwitches, 0, '旧周期故障不得消耗新周期预算')
+    assert.equal(row.execution.dispatch?.configRevision, 2)
+    assert.deepEqual(h.roleRequests.at(-1)?.model, { provider: 'p', modelId: 'actor-c' })
+    assert.equal(row.execution.dispatch?.sessionId, before.execution.dispatch?.sessionId)
+    assert.equal(h.roleRequests.length, 2, '旧stage候选不可先发备用，再补发新主模型')
+  } finally { release.resolve(); h.close() }
+})
+
+test('#287: a genuine work mutation still rejects the queued old receipt after configuration saves', async () => {
+  const h = harness(modelRaceConfig())
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    await h.start()
+    const planJudge = await acceptCurrent(h)
+    h.setRoleQueueGate(release.promise, entered.resolve)
+    const pending = h.engine.handleTurnEnded('ws', planJudge)
+    await entered.promise
+    const arranged = await h.row()
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'p', 'actor-c', 'manager')).ok, true)
+    assert.equal((await h.engine.handleBlock('ws', arranged.execution.nodeToken, 'Manager stops this work generation.', { sessionId: 'manager', turnUserMessageIds: new Set() })).ok, true)
+    const winner = await h.row()
+    release.resolve()
+    await pending
+    assert.deepEqual(await h.row(), winner, '只容许配置穿越，不容许旧业务候选覆写 BLOCK')
+    assert.equal(winner.execution.dispatch?.messageId, undefined)
+    assert.equal(winner.run.roleModelConfigs?.worker.primary.modelId, 'actor-c')
+  } finally { release.resolve(); h.close() }
+})
+
+test('#287: a configuration save while a Program effect runs preserves its one result without replay', async () => {
+  const config = modelRaceConfig()
+  config.workflow.nodes.work = {
+    execution: { type: 'builtin-program', programId: 'github.all-milestone-issues-complete' },
+    results: { PASS: { criteria: 'Complete', target: { return: 'done' } }, FAIL: { criteria: 'Incomplete', target: { return: 'done' } } },
+  }
+  const h = harness(config)
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let effects = 0
+  h.setProgramRun(async () => { effects += 1; entered.resolve(); await release.promise; return { kind: 'PASS', handoff: 'durable Program effect result' } })
+  try {
+    await h.start()
+    await h.engine.handleTurnEnded('ws', await acceptCurrent(h))
+    const ready = await h.row()
+    const pending = h.engine.handleRunProgram('ws', ready.execution.nodeToken, { milestoneNumber: 287 }, 'manager')
+    await entered.promise
+    const arranged = await h.row()
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'p', 'actor-c', 'manager')).ok, true)
+    assert.equal((await h.row()).execution.program?.id, arranged.execution.program?.id)
+    assert.equal((await h.row()).execution.revision, arranged.execution.revision)
+    release.resolve()
+    assert.equal((await pending).ok, true)
+    const completed = await h.row()
+    assert.equal(completed.run.status, 'completed')
+    assert.equal(completed.run.roleModelConfigs?.worker.primary.modelId, 'actor-c')
+    assert.deepEqual(completed.execution.program?.result, { kind: 'PASS', handoff: 'durable Program effect result' })
+    assert.equal(effects, 1)
+    assert.equal((await h.store.events('ws', completed.execution.executionId)).filter(event => event.type === 'program-result').length, 1)
+    assert.equal((await h.engine.handleRunProgram('ws', ready.execution.nodeToken, { milestoneNumber: 287 }, 'manager')).ok, false)
+    assert.equal(effects, 1, '配置保存不能把已成功 effect 变成不确定后重放')
+  } finally { release.resolve(); h.close() }
+})
+
+test('#287: configuration saves during advance drain preserve the accepted handoff and newest role cycles', async () => {
+  const config = configWithReusedWorker('node')
+  const h = harness(config)
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    await h.start()
+    await h.engine.handleTurnEnded('ws', await acceptCurrent(h))
+    const worker = await h.row()
+    const actor = h.caller(worker.execution.dispatch!)
+    await h.engine.handleClaim('ws', { result: 'succeeded', handoff: 'handoff survives the drain window' }, actor)
+    await h.engine.handleTurnEnded('ws', actor)
+    const checking = await h.row()
+    const judge = h.caller(checking.execution.judge!)
+    h.setRoleDrainGate(release.promise, entered.resolve)
+    const pending = h.engine.handleJudgeClaim('ws', checking.execution.nodeToken, 'ACCEPT', 'verified', judge)
+    await entered.promise
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'worker', 'p', 'actor-c', 'manager')).ok, true)
+    assert.equal((await h.engine.handleSetRoleModel('ws', 'judge', 'p', 'judge-new', 'manager')).ok, true)
+    release.resolve()
+    assert.equal((await pending).ok, true)
+    const successor = await h.row()
+    assert.equal(successor.run.status, 'running')
+    assert.equal(successor.execution.nodeId, 'again')
+    assert.equal(successor.execution.input, 'handoff survives the drain window')
+    assert.equal(successor.run.roleModelConfigs?.worker.primary.modelId, 'actor-c')
+    assert.equal(successor.run.roleModelConfigs?.judge.primary.modelId, 'judge-new')
+    assert.equal(successor.run.modelConfigRevision, 2)
+    assert.equal((await h.store.execution('ws', worker.execution.executionId))?.judgment?.result, 'ACCEPT')
+    await h.engine.handleTurnEnded('ws', judge)
+    const dispatched = await h.row()
+    assert.ok(dispatched.execution.dispatch?.messageId)
+    assert.equal(dispatched.execution.dispatch?.configRevision, 1)
+    assert.deepEqual(h.roleRequests.at(-1)?.model, { provider: 'p', modelId: 'actor-c' })
+    assert.deepEqual(h.roleDrains, [worker.execution.dispatch!.sessionId], 'node 复用策略的既有 drain 不因保存配置而重放')
+  } finally { release.resolve(); h.close() }
 })
 
 test('restart reconciliation contains one workspace CAS failure and continues the remaining workspaces', async () => {
