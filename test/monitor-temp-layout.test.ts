@@ -173,12 +173,19 @@ function pointer(overrides: any = {}) {
   }
 }
 
-function drag(ui: any, nodeId: string, dx: number, dy: number) {
-  const button = titleButton(ui.tree, nodeId)
-  const start = button.props.onPointerDown(pointer({ clientX: 100, clientY: 100 }))
-  button.props.onPointerMove(pointer({ clientX: 100 + dx, clientY: 100 + dy }))
-  button.props.onPointerUp(pointer())
-  return { button, start }
+async function drag(ui: any, nodeId: string, dx: number, dy: number) {
+  await settle()
+  const transform = collect(ui.tree, (element) => element.props.className === 'wf-canvas-surface')[0].props.style.transform
+  const scale = /scale\(([^)]+)\)/.exec(transform)
+  assert.ok(scale)
+  const zoom = Number(scale[1])
+  titleButton(ui.tree, nodeId).props.onPointerDown(pointer({ clientX: 100, clientY: 100 }))
+  titleButton(ui.tree, nodeId).props.onPointerMove(pointer({ clientX: 100 + dx * zoom / 2, clientY: 100 + dy * zoom / 2 }))
+  // #286：真实 pointer 事件分帧发生；每次状态渲染后必须使用最新 handler，不能复用旧闭包掩盖 ref 丢失。
+  await settle()
+  titleButton(ui.tree, nodeId).props.onPointerMove(pointer({ clientX: 100 + dx * zoom, clientY: 100 + dy * zoom }))
+  await settle()
+  titleButton(ui.tree, nodeId).props.onPointerUp(pointer())
 }
 
 const settle = async () => {
@@ -209,7 +216,7 @@ test('#276 共享画布：只读拖动只改本页临时位置，点击/下钻�
   const edgePath = () => collect(ui.tree, (element) => element.props.className === 'wf-edge-line')[0].props.d
   const pathBefore = edgePath()
   // 拖动：临时位置随指针移动，松手后保持；不回调 onMove（不写布局、不进撤销栈）。
-  drag(ui, 'review', 120, 60)
+  await drag(ui, 'review', 120, 60)
   await settle()
   assert.deepEqual(nodeStyle(ui.tree, 'review'), { left: '380px', top: '100px' })
   assert.deepEqual(moves, [], '只读临时拖动不能写回布局')
@@ -242,7 +249,7 @@ test('#276 共享画布：只读拖动只改本页临时位置，点击/下钻�
 test('#276 共享画布：卸载重挂保留、切回同 Run/流程恢复、整页刷新清除、恢复布局只重置当前流程', async () => {
   const page = createCanvasPage()
   const first = mountCanvas(page, canvasProps())
-  drag(first, 'review', 100, 40)
+  await drag(first, 'review', 100, 40)
   await settle()
   assert.deepEqual(nodeStyle(first.tree, 'review'), { left: '360px', top: '80px' })
   // 缩放也属于页面内存里的查看状态：与节点位置一起恢复。
@@ -264,7 +271,7 @@ test('#276 共享画布：卸载重挂保留、切回同 Run/流程恢复、整�
   const otherFlow = mountCanvas(page, canvasProps({ viewKey: 'r1:sub' }))
   assert.deepEqual(nodeStyle(otherFlow.tree, 'review'), { left: '260px', top: '40px' })
   // 恢复布局只重置当前流程：仿真 r1:test 的信号，r1:sub 的调整保留。
-  drag(otherFlow, 'review', 40, 0)
+  await drag(otherFlow, 'review', 40, 0)
   await settle()
   const resetApplied = mountCanvas(page, canvasProps({ resetSignal: 0 }))
   assert.deepEqual(nodeStyle(resetApplied.tree, 'review'), { left: '360px', top: '80px' })
@@ -281,7 +288,7 @@ test('#276 共享画布：卸载重挂保留、切回同 Run/流程恢复、整�
 test('#276 共享画布：轮询数据更新不重置临时位置；配置编辑器拖动/保存路径保持可写', async () => {
   const page = createCanvasPage()
   const ui = mountCanvas(page, canvasProps())
-  drag(ui, 'review', 60, 20)
+  await drag(ui, 'review', 60, 20)
   await settle()
   const moved = nodeStyle(ui.tree, 'review')
   // 轮询只更新装饰/模型等数据，位置由页面内存决定，不被 payload 重置。
@@ -291,8 +298,8 @@ test('#276 共享画布：轮询数据更新不重置临时位置；配置编辑
   assert.equal(textOf(ui.tree).includes('等待授权'), true)
   // 编辑器（无 viewKey）行为不变：拖动写回布局，且不会把临时布局带进监控缓存。
   const saved: any[] = []
-  const editor = mountCanvas(page, { readOnly: false, flowId: 'test', def: FLOW_DEF, positions: POSITIONS, startNode: 'plan', returns: ['done'], onMove: (...args: any[]) => saved.push(args) })
-  drag(editor, 'review', 50, 10)
+  const editor = mountCanvas(page, { readOnly: false, flowId: 'test', def: FLOW_DEF, positions: POSITIONS, startNode: 'plan', returns: ['done'], dragRef: { current: null }, onMove: (...args: any[]) => saved.push(args) })
+  await drag(editor, 'review', 50, 10)
   await settle()
   assert.deepEqual(saved, [['test', 'review', { x: 310, y: 50 }]])
   assert.deepEqual(nodeStyle(editor.tree, 'review'), { left: '260px', top: '40px' }, '编辑器位置由外部布局决定，不在拖动时就地生效')
