@@ -31,6 +31,8 @@ import type { NodeExecution, NodeExecutionEvent, RunState } from '../src/types.t
 import { testParticipants } from './helpers/participants.ts'
 import { DISPATCH_TIMEOUTS } from '../src/engine/timeouts.ts'
 import { JUDGE_REQUIRED_TOOLS } from '../src/roles/roles.ts'
+import type { WebRoute } from '../src/editor/rpc.ts'
+import { MODEL_CONFIG_RPC_CHANNEL, type projectModelConfig } from '../src/monitor/model-config.ts'
 
 const MODEL = 'scripted-a30'
 const SUMMARY = 'A30 COMPACT CHECKPOINT: first Role visit completed and its accepted handoff is authoritative.'
@@ -433,7 +435,7 @@ class A287ManagerToolAdapter extends LlmAdapter {
   }
 
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return Promise.resolve(['manager', 'A', 'B', 'C'].map(id => ({ provider, id, name: id })))
+    return Promise.resolve(['manager', 'A', 'B', 'C', 'D'].map(id => ({ provider, id, name: id })))
   }
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -645,6 +647,182 @@ ${visits.map((id, index) => `    ${id}:
       rmSync(root, { recursive: true, force: true })
     }
   })
+})
+
+test('A288 authenticated GUI RPC saves future C/D while A settles, then real Host cold-resumes the same Role Session', { timeout: 30_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-a288-gui-host-'))
+  const home = join(root, 'home')
+  const workspace = join(root, 'workspace')
+  const sessions = join(root, 'sessions')
+  mkdirSync(join(home, 'workflows'), { recursive: true })
+  mkdirSync(workspace)
+  mkdirSync(sessions)
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = new Context()
+  const managerId = 'a288-gui-manager'
+  const adapter = new A287ManagerToolAdapter('worker', managerId)
+  const routes = new Map<string, WebRoute>()
+  const starts: Array<{ id: string; runId: string }> = []
+  const ends: Array<{ runId: string; released: boolean }> = []
+  const epochs: string[] = []
+  ctx.on('subagent/start', info => { starts.push({ id: String(info.id), runId: String(info.runId) }) })
+  ctx.on('subagent/end', info => { ends.push({ runId: String(info.runId), released: ctx.agents.get(info.id) === undefined }) })
+  adapter.beforeJudge = async () => {
+    const request = adapter.targets.at(-1)
+    const epoch = request && starts.findLast(start => start.id === String(request.options.sessionId))
+    if (epoch) await waitFor(async () => ends.some(end => end.runId === epoch.runId && end.released) ? true : undefined)
+  }
+  // 三个 Role 节点：A 正常结算；第二节点 C 合格失败后 D；第三节点仍 D。
+  writeFileSync(join(home, 'workflows', 'a288-gui.yaml'), `schemaVersion: agent-workflow/v3
+roles:
+  worker:
+    persona: A288 isolated Role.
+    reuse: continuable
+    compactBeforeReuse: false
+    model: { provider: ${MODEL}, modelId: A, reasoningEffort: high }
+    fallbackModel: { provider: ${MODEL}, modelId: B, reasoningEffort: low }
+judgeRole:
+  persona: A288 isolated read-only Judge.
+workflow:
+  startNode: kickoff
+  returns: [done]
+  nodes:
+    kickoff:
+      execution: { type: actor-task, role: manager, instruction: A287 CHAIN KICKOFF }
+      checker: { checkerId: judge.claim-correct, config: { criteria: Accept isolated Manager kickoff. } }
+      results:
+        succeeded: { criteria: Manager ready., target: { node: first } }
+${['first', 'second', 'third'].map((id, index, visits) => `    ${id}:
+      execution: { type: actor-task, role: worker, instruction: A288 GUI ${id} accepted route visit. }
+      checker: { checkerId: judge.claim-correct, config: { criteria: Accept isolated Role handoff. } }
+      results:
+        succeeded: { criteria: Role ready., target: ${index + 1 < visits.length ? `{ node: ${visits[index + 1]} }` : '{ return: done }'} }
+`).join('')}`)
+  try {
+    await mountSubagentContractHost(ctx, { workspace, sessions, presetId: 'a288-gui-preset', adapter })
+    await ctx.plugin(CommandRuntime)
+    for (const name of ['read', 'glob', 'grep', 'read_image'] as const) ctx.tools.register(readOnlyFixtureTool(name))
+    const browserPeer = { id: 'a288-trusted-browser' }
+    let admissions = 0
+    // 只替换宿主 transport 身份来源；Opaque BrowserRpcContext 必须由生产挂载器生成。
+    ctx.provide('connection', {
+      browserPeer,
+      admit(req: { headers: Record<string, unknown> }) {
+        admissions++
+        return req.headers['x-a288-browser'] === 'trusted' ? { peer: browserPeer } : { rejection: 401 as const }
+      },
+    })
+    ctx.provide('webServer', { register(route: WebRoute) { routes.set(route.path, route); return () => { routes.delete(route.path) } } })
+    const WorkflowPlugin = await import('../src/index.ts')
+    await ctx.plugin(WorkflowPlugin)
+    const webRoute = await waitFor(async () => routes.get(MODEL_CONFIG_RPC_CHANNEL))
+    let rpcId = 0
+    const rpc = async (method: 'model-config' | 'model-config-save', payload: object) => {
+      const id = `a288-browser-${++rpcId}`
+      const request = {
+        method: 'POST', url: `${MODEL_CONFIG_RPC_CHANNEL}/${method}`,
+        headers: { 'content-type': 'application/json', 'x-a288-browser': 'trusted' },
+        destroy() {},
+        async * [Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ type: 'client-request', rpcId: id, method, payload })) },
+      }
+      const response = {
+        writableEnded: false, status: 0, body: '',
+        write(chunk: unknown) { this.body += chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf8') : String(chunk); return true },
+        end(chunk?: unknown) { if (chunk !== undefined) this.body += String(chunk); this.writableEnded = true },
+        writeHead(status: number) { this.status = status },
+        on() {}, off() {}, once() {},
+      }
+      await webRoute.handler(request, response)
+      assert.equal(response.status, 200, response.body)
+      const envelope = JSON.parse(response.body)
+      assert.equal(envelope.type, 'server-response')
+      assert.equal(envelope.rpcId, id)
+      assert.equal(envelope.result.ok, true, response.body)
+      return envelope.result.value as ReturnType<typeof projectModelConfig> & { message?: string }
+    }
+    const worker = (view: ReturnType<typeof projectModelConfig>) => {
+      const role = view.roles.find(role => role.role === 'worker')
+      assert.ok(role)
+      return role
+    }
+    const manager = await ctx.agentLoop.create(SessionId(managerId), { provider: MODEL, model: 'manager' }, { cwd: workspace })
+    const signal = new AbortController().signal
+    const status = () => ctx.commands.execute(manager, '/dsh-flow status', [], signal).then(commandJson)
+    const started = await ctx.commands.execute(manager, '/dsh-flow start a288-gui', [], signal)
+    assert.equal(started?.result.kind, 'success', JSON.stringify(started))
+    const target = async (index: number) => {
+      const request = await waitFor(async () => adapter.targets[index])
+      const epoch = starts.findLast(start => start.id === String(request.options.sessionId))
+      assert.ok(epoch)
+      epochs[index] = epoch.runId
+      return request
+    }
+    const first = await target(0)
+    const runId = (await status()).runId as string
+    const childId = SessionId(String(first.options.sessionId))
+    const originalPrefix = ctx.agents.get(childId)!.session.snapshotEvents().map(event => JSON.stringify(event))
+    const initialView = await rpc('model-config', { runId })
+    assert.equal(initialView.runId, runId)
+    assert.equal(initialView.workflowId, 'a288-gui')
+    assert.equal(initialView.status, 'running')
+    const initial = worker(initialView)
+    assert.deepEqual(initial.actual, { provider: MODEL, modelId: 'A', reasoningEffort: 'high' })
+    assert.equal(initial.pending, false)
+    const saved = await rpc('model-config-save', { runId, role: 'worker', expectedRevision: initial.revision, requestId: 'a288-save-c-d',
+      primary: { provider: MODEL, modelId: 'C' }, fallback: { provider: MODEL, modelId: 'D', reasoningEffort: 'low' } })
+    assert.match(saved.message ?? '', /下次新派发生效/)
+    assert.equal(saved.runId, runId)
+    assert.equal(saved.workspaceKey, initialView.workspaceKey, 'save remains bound to the exact Run read from the selector')
+    const pending = worker(saved)
+    assert.deepEqual(pending.primary, { provider: MODEL, modelId: 'C' })
+    assert.deepEqual(pending.fallback, { provider: MODEL, modelId: 'D', reasoningEffort: 'low' })
+    assert.equal(pending.revision, initial.revision + 1)
+    assert.deepEqual(pending.actual, initial.actual, 'saving C/D cannot relabel the actual in-flight A request')
+    assert.equal(pending.pending, true)
+    assert.equal(adapter.targets.length, 1, 'GUI save does not interrupt A or dispatch C before normal settlement')
+    assert.deepEqual(ctx.agents.get(childId)!.session.snapshotEvents().slice(0, originalPrefix.length).map(event => JSON.stringify(event)), originalPrefix)
+    first.finish.resolve('accept')
+    await target(1)
+    const selectedC = worker(await rpc('model-config', { runId }))
+    assert.deepEqual(selectedC.actual, { provider: MODEL, modelId: 'C' })
+    assert.equal(selectedC.pending, false)
+    assert.notEqual(epochs[1], epochs[0], 'GUI-selected C must survive actual cold materialization, not descriptor A')
+    assert.ok(ends.some(end => end.runId === epochs[0] && end.released))
+    assert.match(messageText(adapter.targets[1]!.options), /A288 GUI first accepted route visit/)
+    assert.match(messageText(adapter.targets[1]!.options), /A287 Role accepted with its frozen actual request route/)
+    adapter.targets[1]!.finish.resolve('fail')
+    await target(2)
+    const fallback = worker(await rpc('model-config', { runId }))
+    assert.deepEqual(fallback.actual, { provider: MODEL, modelId: 'D', reasoningEffort: 'low' })
+    assert.deepEqual(fallback.primary, { provider: MODEL, modelId: 'C' }, 'actual fallback must not masquerade as the saved primary')
+    assert.equal(fallback.revision, pending.revision)
+    assert.equal(fallback.pending, false)
+    adapter.targets[2]!.finish.resolve('accept')
+    await target(3)
+    assert.deepEqual(adapter.targets.map(({ options }) => [options.provider, options.model, options.reasoningEffort]),
+      [[MODEL, 'A', 'high'], [MODEL, 'C', 'medium'], [MODEL, 'D', 'low'], [MODEL, 'D', 'low']])
+    assert.ok(adapter.targets.every(({ options }) => options.sessionId === childId), 'GUI edits and fallback keep the original durable Session')
+    assert.notEqual(epochs[3], epochs[2], 'fallback D also persists across a subsequent cold Role continuation')
+    assert.deepEqual(worker(await rpc('model-config', { runId })).actual, fallback.actual)
+    const persisted = await ctx.sessionPersistence.open(childId, 'read')
+    try {
+      const events = (await persisted.read(0)).events
+      assert.deepEqual(events.slice(0, originalPrefix.length).map(event => JSON.stringify(event)), originalPrefix, 'GUI edits never rewrite existing Session history')
+    } finally { await persisted.close() }
+    adapter.targets[3]!.finish.resolve('accept')
+    await waitFor(async () => (await status()).status === 'completed' ? true : undefined)
+    assert.equal(manager.session.snapshotEvents().filter(event => event.type === 'tool/call' && event.data.name === 'workflow_set_role_model').length, 0,
+      'the GUI path must not impersonate the fixed Manager tool caller')
+    assert.equal(admissions, rpcId, 'all model configuration calls passed the production transport identity gate')
+  } finally {
+    adapter.stopping = true
+    for (const request of adapter.targets) request.finish.resolve('accept')
+    await ctx.fiber.dispose()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('A30 real DSH Host composes cold Role continuation, Basic compaction, Host interrupt, and same-execution resume', { timeout: 30_000 }, async () => {

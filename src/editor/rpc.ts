@@ -31,7 +31,11 @@ export type EditorRpcResult =
   | { ok: true; value: unknown }
   | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } }
 
-export type EditorRpcHandler = (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<EditorRpcResult>
+export type EditorRpcHandler = (endpoint: string, payload: unknown, signal: AbortSignal, context?: unknown) => Promise<EditorRpcResult>
+
+// #288：仅传输层持有的标记；payload/直接调用不能声明浏览器身份。
+const browserRpcContext = Object.freeze({})
+export const isBrowserRpcCall = (context: unknown): boolean => context === browserRpcContext
 
 function fail(code: string, message: string, details: Record<string, unknown> = {}): EditorRpcResult {
   return { ok: false, error: { code, message, details } }
@@ -301,20 +305,31 @@ function registerConnectionRpc(ctx: { connection?: ConnectionService }, channel:
  * （鉴权 requestRejection + httpBridge），旧宿主回退 `connection.rpc.handle`。
  * installEditorRpc 即本函数以编辑器通道与 deps 的特化。
  */
-export function mountRpcChannel(ctx: EditorWebCtx, channel: string, handler: EditorRpcHandler):
+export function mountRpcChannel(ctx: EditorWebCtx, channel: string, handler: EditorRpcHandler, options: { browserOnly?: boolean } = {}):
   | { status: 'mounted'; dispose: () => void }
   | { status: 'fallback'; dispose: () => Promise<void> }
   | { status: 'skipped' } {
   const connection = ctx.connection
   const webServer = ctx.webServer
   if (connection !== undefined && webServer !== undefined && typeof webServer.register === 'function') {
-    const fetchHandler = editorFetchHandler(channel, handler)
+    const fetchHandler = editorFetchHandler(channel, options.browserOnly
+      ? (endpoint, payload, signal) => handler(endpoint, payload, signal, browserRpcContext)
+      : handler)
     const route: WebRoute = {
       kind: 'prefix',
       path: channel,
       handler: async (req, res) => {
         let rejection: number | undefined = 403
-        if (typeof connection.requestRejection === 'function') {
+        if (options.browserOnly) {
+          // rc.5：API Peer 也可能是 owner；只接受宿主实际 browserPeer，缺 API 即拒绝。
+          try {
+            if (connection.browserPeer != null && typeof connection.admit === 'function') {
+              const admission = connection.admit(req)
+              rejection = 'rejection' in admission ? admission.rejection
+                : admission.peer === connection.browserPeer ? undefined : 403
+            }
+          } catch { rejection = 403 }
+        } else if (typeof connection.requestRejection === 'function') {
           try { rejection = connection.requestRejection(req) } catch { rejection = 403 }
         }
         if (rejection !== undefined) {
@@ -344,7 +359,11 @@ export function mountRpcChannel(ctx: EditorWebCtx, channel: string, handler: Edi
         : () => {}
     return { status: 'mounted', dispose: cleanup }
   }
-  const fallback = registerConnectionRpc(ctx, channel, handler)
+  const fallback = registerConnectionRpc(ctx, channel, options.browserOnly
+    ? (endpoint, payload, signal, peer) => connection?.browserPeer != null && peer === connection.browserPeer
+      ? handler(endpoint, payload, signal, browserRpcContext)
+      : Promise.resolve(fail('model-config/forbidden', '需要已鉴权的人类 GUI 浏览器连接'))
+    : handler)
   if (fallback.status === 'registered') return { status: 'fallback', dispose: fallback.dispose }
   return { status: 'skipped' }
 }
@@ -400,7 +419,11 @@ export interface WebRoute {
 }
 
 export interface EditorWebCtx {
-  connection?: ConnectionService & { requestRejection?: (req: NodeLikeRequest) => number | undefined }
+  connection?: ConnectionService & {
+    requestRejection?: (req: NodeLikeRequest) => number | undefined
+    browserPeer?: unknown
+    admit?: (req: NodeLikeRequest) => { peer: unknown } | { rejection: 401 | 403 }
+  }
   webServer?: { register(route: WebRoute): unknown }
 }
 

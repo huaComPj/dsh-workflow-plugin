@@ -39,6 +39,7 @@ const runSchema = z.object({
   }).strict()).optional(),
   roleModelConfigs: z.record(z.string(), z.object({
     primary: model, fallback: model.optional(), revision,
+    receipt: z.object({ requestId: text.max(128), expectedRevision: revision, primary: model, fallback: model.optional() }).strict().optional(),
   }).strict()).optional(),
   modelConfigRevision: revision.optional(),
   // v3: 已确认的业务终局（名字 + 终局来源 executionId）；handoff 不做第二份镜像。

@@ -91,6 +91,16 @@ export interface StateHost {
 // 「成功但无 run」的返回点是无活动 Run 的 reset 幂等成功（`no active run`，不写库/不产生事件）；
 // 失败分支不带 run。新增 `run` 读取点必须处理 `undefined`（strict 编译期可拦），不得假设成功必有 Run。
 export type EngineOutcome = { ok: true; run?: RunState; message: string } | { ok: false; reason: string }
+export interface SaveRoleModelConfigInput {
+  runId: string
+  role: string
+  expectedRevision: number
+  requestId?: string
+  primary: DelegationRoute
+  fallback?: DelegationRoute
+}
+export type ModelConfigSaveResult = { ok: true; run: RunState; message: string; replayed: boolean }
+  | { ok: false; code: string; reason: string }
 export function executorSessionOf(run: RunState): string {
   const frame = topFrame(run)
   const def = frame.workflowId === run.catalogWorkflowId ? run.definitionSnapshot.workflow : run.definitionSnapshot.childWorkflows?.[frame.workflowId]
@@ -1652,38 +1662,83 @@ export class WorkflowEngine {
     const row = await this.configState.get(ws)
     if (!row || row.run.status === 'completed' || row.run.status === 'terminated') return rejected('workflow_set_role_model requires the current active Run')
     if (caller !== row.run.managerSessionId) return rejected('workflow_set_role_model is Manager-only')
-    if (role !== 'judge' && !Object.hasOwn(row.run.definitionSnapshot.roles, role)) return rejected(`unknown role "${role}"`)
-    // #172: reasoningEffort 非字符串（工具层透传的越界类型）同样 fail-closed；
-    // 校验全部发生在 mutation 之前，失败不留部分 override。
-    if (reasoningEffort !== undefined && typeof reasoningEffort !== 'string') return rejected('reasoningEffort must be a string when provided')
-    let route
-    try { route = normalizeModelRoute(provider, model, reasoningEffort) } catch (error) { return rejected(error instanceof Error ? error.message : String(error)) }
-    // #223/#287：同值主动设置也先过同一目录/能力校验；所有校验先于原子保存。
-    let validatedNote: string | undefined
-    if (this.validateModelRoute !== undefined) {
-      let verdict
-      try {
-        verdict = await this.validateModelRoute(route.provider, route.modelId, route.reasoningEffort)
-      } catch (error) {
-        return rejected(`model route validation failed: ${error instanceof Error ? error.message : String(error)}`)
-      }
-      if (!verdict.ok) return rejected(verdict.reason ?? 'model route rejected')
-      validatedNote = verdict.note
-    }
-    const withNote = (message: string): string =>
-      validatedNote === undefined || validatedNote === '' ? message : `${message}（${validatedNote}）`
-    const current = await this.configState.get(ws)
-    if (!current || current.run.runId !== row.run.runId || !['running', 'blocked'].includes(current.run.status)) return rejected('Run changed during model validation')
-    if (roleModelConfig(current.run, role).revision !== roleModelConfig(row.run, role).revision) return rejected('model configuration changed during validation; reload and retry')
-    const config = roleModelConfig(current.run, role)
-    current.run.roleModelConfigs = { ...(current.run.roleModelConfigs ?? {}), [role]: { ...config, primary: route, revision: config.revision + 1 } }
-    current.run.modelConfigRevision = (current.run.modelConfigRevision ?? 0) + 1
-    current.run.modelOverrides[role] = route
-    current.run.roleRoutes = { ...(current.run.roleRoutes ?? {}), [role]: { stage: 'primary', reason: 'manager-set', autoSwitches: 0 } }
-    await this.configState.put(ws, current.run, current.version, [])
-    this.trace(current.run, 'MODEL', { workflow: current.execution.workflowId, role, provider: jsonField(route.provider, LIMITS.providerMax), model: jsonField(route.modelId, LIMITS.modelIdMax), ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: jsonField(route.reasoningEffort, LIMITS.reasoningEffortMax) }) })
-    return { ok: true, run: current.run, message: withNote(`next dispatch primary saved for ${role}`) }
+    const config = roleModelConfig(row.run, role)
+    const saved = await this.handleSaveRoleModelConfig(ws, {
+      runId: row.run.runId, role, expectedRevision: config.revision,
+      primary: { provider, modelId: model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) },
+      ...(config.fallback === undefined ? {} : { fallback: config.fallback }),
+    })
+    return saved.ok ? saved : rejected(saved.reason)
+  }
 
+  /** #288：共享配置原子服务，不代表 Manager 身份；人类入口的鉴权只在 RPC 传输层。 */
+  async handleSaveRoleModelConfig(ws: string, input: SaveRoleModelConfigInput): Promise<ModelConfigSaveResult> {
+    const fail = (code: string, reason: string): ModelConfigSaveResult => ({ ok: false, code, reason })
+    const { runId, role, expectedRevision, requestId } = input
+    let primary: ReturnType<typeof normalizeModelRoute>
+    let fallback: ReturnType<typeof normalizeModelRoute> | undefined
+    const normalize = (route: DelegationRoute): ReturnType<typeof normalizeModelRoute> => {
+      if (typeof route?.provider !== 'string' || typeof route.modelId !== 'string'
+        || (route.reasoningEffort !== undefined && typeof route.reasoningEffort !== 'string')) throw new WorkflowError('provider/modelId/reasoningEffort must be strings')
+      return normalizeModelRoute(route.provider, route.modelId, route.reasoningEffort)
+    }
+    try {
+      primary = normalize(input.primary)
+      fallback = input.fallback === undefined ? undefined : normalize(input.fallback)
+    } catch (error) { return fail('invalid-route', error instanceof Error ? error.message : String(error)) }
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return fail('invalid-payload', 'expectedRevision must be a nonnegative integer')
+    if (requestId !== undefined && (typeof requestId !== 'string' || requestId.trim() === '' || requestId.length > 128)) return fail('invalid-payload', 'requestId must contain 1..128 characters')
+    const key = JSON.stringify({ primary, fallback })
+    const inspect = (row: RuntimeRow | undefined): ModelConfigSaveResult | undefined => {
+      if (!row || row.run.runId !== runId) return fail('target-not-found', 'exact Run is no longer current; reload without fallback')
+      if (!['running', 'blocked'].includes(row.run.status)) return fail('read-only', 'terminal Run is read-only')
+      if (role !== 'judge' && !Object.hasOwn(row.run.definitionSnapshot.roles, role)) return fail('invalid-payload', `unknown role "${role}"`)
+      const config = roleModelConfig(row.run, role)
+      const receipt = config.receipt
+      if (requestId !== undefined && receipt?.requestId === requestId) {
+        if (receipt.expectedRevision === expectedRevision && config.revision === expectedRevision + 1
+          && JSON.stringify({ primary: receipt.primary, fallback: receipt.fallback }) === key) return { ok: true, run: row.run, message: '下次新派发生效', replayed: true }
+        return fail('conflict', 'requestId was already used for a different configuration')
+      }
+      if (config.revision !== expectedRevision) return fail('conflict', 'model configuration changed during validation; reload and retry')
+      return undefined
+    }
+    const initial = await this.configState.get(ws)
+    const initialResult = inspect(initial)
+    if (initialResult) return initialResult
+    const notes: string[] = []
+    if (this.validateModelRoute !== undefined) {
+      for (const route of [primary, ...(fallback === undefined ? [] : [fallback])]) {
+        try {
+          const verdict = await this.validateModelRoute(route.provider, route.modelId, route.reasoningEffort)
+          if (!verdict.ok) return fail('invalid-route', verdict.reason ?? 'model route rejected')
+          if (verdict.note) notes.push(verdict.note)
+        } catch (error) { return fail('invalid-route', `model route validation failed: ${error instanceof Error ? error.message : String(error)}`) }
+      }
+    }
+    // ponytail: 三次短 CAS 重试容忍工作单/其他角色 churn；同角色配置变化须显式重载。
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = await this.configState.get(ws)
+      const result = inspect(current)
+      if (result) return result
+      const config = { primary, ...(fallback === undefined ? {} : { fallback }), revision: expectedRevision + 1,
+        ...(requestId === undefined ? {} : { receipt: { requestId, expectedRevision, primary, ...(fallback === undefined ? {} : { fallback }) } }) }
+      current!.run.roleModelConfigs = { ...(current!.run.roleModelConfigs ?? {}), [role]: config }
+      current!.run.modelConfigRevision = (current!.run.modelConfigRevision ?? 0) + 1
+      current!.run.modelOverrides[role] = primary
+      current!.run.roleRoutes = { ...(current!.run.roleRoutes ?? {}), [role]: { stage: 'primary', reason: requestId === undefined ? 'manager-set' : 'human-set', autoSwitches: 0 } }
+      try { await this.configState.put(ws, current!.run, current!.version, []) }
+      catch (error) {
+        const latest = await this.configState.get(ws)
+        const changed = inspect(latest)
+        if (changed) return changed
+        if (latest!.version === current!.version) return fail('save-failed', error instanceof Error ? error.message : String(error))
+        continue
+      }
+      this.trace(current!.run, 'MODEL', { workflow: current!.execution.workflowId, role, provider: jsonField(primary.provider, LIMITS.providerMax), model: jsonField(primary.modelId, LIMITS.modelIdMax), ...(primary.reasoningEffort === undefined ? {} : { reasoningEffort: jsonField(primary.reasoningEffort, LIMITS.reasoningEffortMax) }) })
+      return { ok: true, run: current!.run, message: `next dispatch primary saved for ${role}${requestId === undefined ? '' : '；下次新派发生效'}${notes.length ? `（${notes.join('；')}）` : ''}`, replayed: false }
+    }
+    return fail('conflict', 'Run remained busy; reload and retry')
   }
   /**
    * `rootSession` 是 host 边界（`src/commands/dsh-flow.ts` 的 `isRootCommandAgent`）判定
