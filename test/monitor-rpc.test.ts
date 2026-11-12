@@ -170,7 +170,7 @@ test('#262 status→视图投影：图卡生效模型来自服务端投影，缺
     const payload = result.value as Extract<typeof result.value, { mode: 'run' }>
     const main = monitorViewModel(payload).run!.graph.flows.find(flow => flow.id === 'test')!
     // reviewer 显式声明模型：画布装饰文本直接用服务端算出的 provider/modelId。
-    assert.equal(main.decorations.review.summary, 'prov/m-review')
+    assert.equal(main.decorations.review.summary, '配置模型：prov/m-review')
     // manager 继承默认路由：本 harness 无冻结路由 → 服务端投影为空对象，
     // 客户端安全降级（不制造 unknown/假 provider），已执行节点的状态徽标照常。
     assert.deepEqual(payload.run!.flows.test.nodes.find(node => node.id === 'plan')!.model, {})
@@ -464,13 +464,13 @@ test('#270 AC-10 默认模型继承正例：冻结 managerRoute 投影到根/子
     // 同一 payload 经 view-model：summary 为精确 provider/modelId 文本；无工作单节点不虚构 badge。
     const view = monitorViewModel(payload)
     const mainFlow = view.run!.graph.flows.find(flow => flow.id === 'test')!
-    assert.equal(mainFlow.decorations.plan.summary, 'mgr/m-manager')
+    assert.equal(mainFlow.decorations.plan.summary, '配置模型：mgr/m-manager')
     assert.equal(typeof mainFlow.decorations.plan.badge, 'string', '已执行节点保留执行叠加态')
-    assert.equal(mainFlow.decorations.review.summary, 'prov/m-review')
+    assert.equal(mainFlow.decorations.review.summary, '配置模型：prov/m-review')
     assert.equal(mainFlow.decorations['call-child'], undefined, '非 Actor 节点无叠加态')
     const subFlow = view.run!.graph.flows.find(flow => flow.id === 'sub')!
-    // s1 是「无工作单的 Actor」：只显示生效模型，不因显示模型而伪造执行 badge。
-    assert.deepEqual(subFlow.decorations.s1, { summary: 'mgr/m-manager' })
+    // s1 是「无工作单的 Actor」：只显示配置模型，不因显示配置而伪造执行 badge。
+    assert.deepEqual(subFlow.decorations.s1, { summary: '配置模型：mgr/m-manager' })
   } finally { h.cleanup() }
 })
 
@@ -602,7 +602,7 @@ test('#274 当前执行卡：投影 → 视图模型（角色/模型来源/状�
     assert.ok(review.nodes.some(node => node.executionId === reviewRow.execution.executionId), '节点行携带 execution 身份')
 
     // 结束 Run：卡片改为结束位置，活动文案不再冒充正在执行。
-    h.engine.handleReset('ws', 'manager')
+    await h.engine.handleReset('ws', 'manager')
     const terminated = monitorViewModel((await handler('status', { cwd: 'ws' })).value)
     assert.equal(terminated.currentExecution!.heading, '结束位置')
     assert.equal(terminated.currentExecution!.active, false)

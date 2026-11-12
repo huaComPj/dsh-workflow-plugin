@@ -25,6 +25,7 @@ import { makeWorkflowTools, type ToolHost } from './tools/tools.ts'
 import { authorizeToolCall } from './tools/authz.ts'
 import { installEditorRpc, mountRpcChannel } from './editor/rpc.ts'
 import { MONITOR_RPC_CHANNEL, createMonitorRpcHandler } from './monitor/rpc.ts'
+import { MODEL_CONFIG_RPC_CHANNEL, createModelConfigRpcHandler } from './monitor/model-config.ts'
 import { readRunLayout } from './monitor/layout.ts'
 import { isRootCommandAgent, makeBlankSessionActivator, makeDshFlowCommand, type CommandHost } from './commands/dsh-flow.ts'
 import { makeStateHost, makeDispatchTargets, makeSubagentHost, managerRouteOf, programHost, type HostAdapters } from './plugin/host.ts'
@@ -468,6 +469,14 @@ export function apply(ctx: Context) {
         layout: workflowId => readRunLayout(home, workflowId),
       }))
       if (monitor.status !== 'skipped') disposeEditorRpcFns.push(monitor.dispose)
+      const modelConfig = mountRpcChannel(webCtx as Parameters<typeof mountRpcChannel>[0], MODEL_CONFIG_RPC_CHANNEL, createModelConfigRpcHandler({
+        maintenance: () => stateAccess.maintenanceDiagnostic(),
+        byRunId: runId => store().getByRunId(runId),
+        latest: workspaceKey => store().get(workspaceKey),
+        executions: runId => store().runExecutionsByRunId(runId),
+        save: (workspaceKey, input) => engine.handleSaveRoleModelConfig(workspaceKey, input),
+      }), { browserOnly: true })
+      if (modelConfig.status !== 'skipped') disposeEditorRpcFns.push(modelConfig.dispose)
     })
   } else {
     const installed = installEditorRpc(ctx as Parameters<typeof installEditorRpc>[0], catalogDeps)

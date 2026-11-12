@@ -58,7 +58,7 @@ export function bundleSources() {
     .replace(/^export\s+/gm, '')
   const monitorView = read('monitor-view.js').replace(/^export\s+/gm, '')
   const graphCanvas = rewriteImports(read('graph-canvas.js'), 'react', "require('react')").replace(/^export\s+/gm, '')
-  const monitor = rewriteImports(rewriteImports(rewriteImports(rewriteImports(read('monitor.js'), 'react', "require('react')"), './monitor-view.js', '__monitorView'), './graph-canvas.js', '__graphCanvas'), './styles.js', '__styles')
+  const monitor = rewriteImports(rewriteImports(rewriteImports(rewriteImports(rewriteImports(read('monitor.js'), 'react', "require('react')"), './monitor-view.js', '__monitorView'), './graph-canvas.js', '__graphCanvas'), './styles.js', '__styles'), './model-selector.js', '__modelSelector')
     .replace(/^export\s+/gm, '')
   const panel = rewriteImports(read('panel.js'), 'react', "require('react')")
   const panelLinked = rewriteImports(rewriteImports(rewriteImports(rewriteImports(rewriteImports(panel, './rpc.js', '__rpc'), './edits.js', '__edits'), './styles.js', '__styles'), './model-selector.js', '__modelSelector'), './graph-canvas.js', '__graphCanvas')

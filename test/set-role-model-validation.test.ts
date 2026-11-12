@@ -179,6 +179,21 @@ async function started(engine: WorkflowEngine): Promise<void> {
     engine.buildInitialRun('manager', 'set-role-model-validation', CONFIG, 'hash'), undefined, 'root request')).ok, true)
 }
 
+test('#287 未知/继承属性角色不能设模，拒绝不写配置或执行身份', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'workflow-set-validation-'))
+  const store = new StateStore(home)
+  const engine = engineFor(store)
+  try {
+    await started(engine)
+    const before = await store.get('ws')
+    for (const role of ['ghost', 'manager', 'constructor', '__proto__']) {
+      const rejected = await engine.handleSetRoleModel('ws', role, 'p', 'm', 'manager')
+      assert.equal(rejected.ok, false)
+      assert.deepEqual(await store.get('ws'), before)
+    }
+  } finally { store.close(); rmSync(home, { recursive: true, force: true }) }
+})
+
 test('#223 engine：校验拒绝不写 override', async () => {
   const home = mkdtempSync(join(tmpdir(), 'workflow-set-validation-'))
   const store = new StateStore(home)
@@ -202,7 +217,7 @@ test('#223 engine：放行 note 注明进成功消息', async () => {
     engine.validateModelRoute = async () => ({ ok: true, note: '档位未校验： boom' })
     const set = await engine.handleSetRoleModel('ws', 'worker', 'p', 'm', 'manager', 'medium')
     assert.equal(set.ok, true)
-    assert.match(set.message!, /model override saved for worker/)
+    assert.match(set.message!, /next dispatch primary saved for worker/)
     assert.match(set.message!, /档位未校验/)
     assert.deepEqual((await store.get('ws'))!.run.modelOverrides.worker,
       { provider: 'p', modelId: 'm', reasoningEffort: 'medium' })

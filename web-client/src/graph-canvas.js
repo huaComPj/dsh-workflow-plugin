@@ -60,7 +60,9 @@ export function portsOf(node) {
 export function NodeCanvas(props) {
   const { flowId, def, positions, startNode, returns = [], onMove = noop, busy } = props
   const { selectedNode = null, wire = null, onSelectNode = noop, onPortStart = noop, onWireNode = noop, onWireReturn = noop, onCancelWire = noop, decorations = {}, readOnly = false } = props
-  const dragRef = props.dragRef ?? { current: null }
+  // 监控不传外部 ref；手势跨状态重渲染时仍须保留起点和末位置。
+  const localDragRef = useRef(null)
+  const dragRef = props.dragRef ?? localDragRef
   // #276：viewKey = Run + 流程 identity。只读监控传它 → 允许单节点临时拖动并在
   // 卸载/重挂后按同一 viewKey 恢复；配置编辑器不传，行为保持原样（拖动即写回布局）。
   // 不变量：viewKey 变更必须伴随重挂（调用方用 key），否则会继续显示旧 key 的位置/缩放。

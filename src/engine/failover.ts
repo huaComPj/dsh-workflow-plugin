@@ -96,7 +96,7 @@ export function failoverNote(input: {
   const head = `角色 "${input.role}" 的模型路由在 ${describeActorFailure(input.facts)}（${input.kind}）后由宿主终止重试并安全收口；本轮第 ${input.autoSwitches} 次自动切换：${input.from} → ${input.to}（${input.target === 'primary' ? '主模型' : '备用模型'}）。`
   const tail = input.exhausted
     ? '本 Run 该角色已无可用备用路由，再次合格故障将直接 BLOCK（详见下方要求）。'
-    : '本 Run 该角色此后保持该路由，不自动回切；如仍需换模型，由 Manager 显式设置后开新一轮（C → 主 → 备用）。'
+    : '本次使用当前主模型，其后合格故障才可切当前备用。Manager 再次主动设置可重开一轮（新主 → 当前备用 → BLOCK）。'
   const recovery = '上一执行的 [handoff] 与节点材料原样保留，不代表其外部操作一定回滚：续作前先用工具核验已执行外部操作的真实结果（如 PR/分支是否已合并或推送、文件与远端状态是否已改、下游任务是否已跑），已完成的不要重复执行；无法核验或存在不确定副作用时保持 BLOCK 并说明，不要盲目重试。'
   return `${head}${tail}\n\n${recovery}`.slice(0, LIMITS.blockReasonMax)
 }

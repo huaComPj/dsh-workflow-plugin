@@ -3,14 +3,14 @@ import test from 'node:test'
 import { bundleSources } from '../web-client/build.mjs'
 
 /**
- * #282 监控面板展示契约：主题色、记录表滚动、运行图高度。
- * 这些是纯 CSS 事实（无 DOM 可测），直接断言内联样式表文本；行为侧断言在 monitor-poll-lifecycle。
+ * #282 监控主题接线与静态样式回归；不证明滚动、几何或实际合成对比度。
+ * 行为侧断言在 monitor-poll-lifecycle；#286 滚动/布局/主题的实效必须另跑真实 Host GUI。
  */
 function monitorStyles(): string {
   // 执行真实打包转换后的模块，只取样式值：声明顺序和相邻函数不会扩大扫描范围。
   // 依赖仅在组件调用时使用；这里不挂载 React，也不复制 import/export 转换规则。
-  const styles = new Function('require', '__monitorView', '__graphCanvas', '__styles',
-    `${bundleSources().monitor}\nreturn MONITOR_STYLES;`)(() => ({}), {}, {}, {})
+  const styles = new Function('require', '__monitorView', '__graphCanvas', '__styles', '__modelSelector',
+    `${bundleSources().monitor}\nreturn MONITOR_STYLES;`)(() => ({}), {}, {}, {}, {})
   assert.equal(typeof styles, 'string')
   // 去掉注释：注释里会说明「不再用 --dsh-text/#ddd」，不是样式规则本身。
   return styles.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -38,15 +38,6 @@ test('#282 监控根容器在受限侧栏内收缩并承担整栏纵向滚动', 
   assert.match(rule, /flex: 1 1 auto/, '根容器应占满宿主 tab 的可用高度')
   assert.match(rule, /min-height: 0/, '允许根容器小于内容高度，避免被宿主 tabBody 裁切')
   assert.match(rule, /overflow-y: auto/, '整栏主滚动由根容器承接，不依赖被裁切隔断的外层滚动')
-})
-
-test('#282 执行记录表只保留横向滚动，不再有独立限高的纵向滚动区', () => {
-  const styles = monitorStyles()
-  const rule = /\.wf-monitor-records-scroll \{[^}]*\}/.exec(styles)?.[0] ?? ''
-  assert.match(rule, /overflow-x: auto/)
-  assert.match(rule, /overflow-y: hidden/)
-  assert.doesNotMatch(rule, /max-height/, '内层纵向限高会让整栏滚动路径断裂：记录被困在 360px 盒子里')
-  assert.doesNotMatch(styles, /max-height:\s*360px/)
 })
 
 test('#282 运行图默认高度适中，并用更高特异度压过共享编辑器的 460px 覆盖', () => {

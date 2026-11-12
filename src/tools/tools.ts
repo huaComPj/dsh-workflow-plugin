@@ -244,7 +244,7 @@ export function makeWorkflowTools(host: ToolHost): ToolDefinition[] {
 
     defineTool({
       name: 'workflow_set_role_model',
-      description: 'Manager 为某个 Role 或 Judge 切换模型（provider + modelId，可选 reasoningEffort 显式档位；省略即清空旧档位，后续派发使用目标模型默认档位，换到与 Manager 相同路由也不重新继承 Manager 档位）。只影响之后新建的会话：Worker 覆盖即删旧映射（下次派发按新路由重建；同模型覆盖有存活会话时同样重建，不再静默复用），Judge 覆盖后 node_resume 自动对旧会话走 fresh（释放旧会话 + 新路由 spawn）；目标 Role 有 active Actor 时拒绝，正在判定的 live Judge 会话不受影响。',
+      description: '固定 Manager 为当前 Run 的普通 Role 或 Judge 保存下一次派发的主模型，保留备用模型及会话/上下文（provider + modelId，可选 reasoningEffort；省略清空旧档位且不继承 Manager 档位）。允许目标正在执行；已登记派发继续使用原模型快照，新登记派发才生效，冷热续接均不因换模额外 fresh。每次成功设置（含同值/仅档位）开启独立恢复轮：新主合格故障切当前备用，备用故障 BLOCK；不会回到冻结定义的旧主模型。不修改工作流定义或全局默认模型。',
       parameters: {
         roleKey: { type: 'string', required: true, description: 'roleKey 或 judge' },
         provider: { type: 'string', required: true, description: 'provider route' },

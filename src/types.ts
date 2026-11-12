@@ -435,6 +435,15 @@ export interface RoleRouteState {
   autoSwitches?: number
 }
 
+/** #287：Run 内主动保存的主备配置；revision 标识一次保存，而非路由值是否改变。 */
+export interface RoleModelConfig {
+  primary: DelegationRoute
+  fallback?: DelegationRoute
+  revision: number
+  /** #288：仅保留最后一次 GUI 保存收据，重试去重；不是审计历史。 */
+  receipt?: { requestId: string; expectedRevision: number; primary: DelegationRoute; fallback?: DelegationRoute }
+}
+
 /** Run只管位置/控制/固定Snapshot/Role映射；节点材料属于NodeExecution。 */
 export interface RunState {
   runId: string
@@ -452,6 +461,10 @@ export interface RunState {
    * primary 起（旧快照/旧配置不受影响）。
    */
   roleRoutes?: Record<string, RoleRouteState>
+  /** #287：只影响此 Run 后续新登记派发的主备配置；缺席时保持旧路由语义。 */
+  roleModelConfigs?: Record<string, RoleModelConfig>
+  /** #287：成功保存配置的次数；缺席视为 0，与业务工作单版本分离。 */
+  modelConfigRevision?: number
   blockReason: string | null
   /** 当前 visit；completed 时仍指向终局工作单，最终交付从该工作单读取。 */
   currentExecutionId: string
@@ -486,12 +499,14 @@ export interface ExecutionDispatch {
   messageId?: string
   settled: boolean
   /**
-   * #274 监控事实：本次派发实际解析到的路由（与 spawn 同源 `resolveRoleModel`）。
-   * 只供只读投影显示「实际派发模型」；旧行无该字段 = 未记录，不回填当前配置。
+   * #287：登记时冻结的本次派发路由，Host 与只读监控共同消费；后续配置不改写。
+   * 旧行无该字段 = 未记录，不回填当前配置。
    */
   model?: DelegationRoute
   /** #274 监控事实：该路由的来源阶段（primary/fallback/manual）；旧行缺失 = 来源未知。 */
   source?: RoleRouteStage
+  /** #287：本次派发所属角色配置版本；缺席为旧派发，不能补成最新版本。 */
+  configRevision?: number
 }
 
 export interface ExecutionClaim extends NodeClaim {
@@ -503,14 +518,7 @@ export interface ExecutionJudge extends ExecutionDispatch {
   sessionId: string
   claimId: string
   inputVersion: number
-  /**
-   * Issue #22：该 Judge 会话创建时解析到的生效路由快照（override > role def >
-   * Run 冻结值，与 `resolveRoleModel` 同源）。`node_resume` 在偏好 followup 前
-   * 比对它与当前解析值：override 已热更新则旧会话仍绑定旧路由，自动走 fresh
-   *（释放旧会话 + 新路由 spawn），与 Role Actor“覆盖即删映射”一致。旧行无该
-   * 字段：有 judge override 即视为已过期（fail-safe 走 fresh），无 override
-   * 则保持原 followup 行为。
-   */
+  /** 本次 Judge 派发的冻结路由；切换模型不再等同于替换 Judge Session。 */
   model?: DelegationRoute
 }
 

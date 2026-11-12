@@ -2,6 +2,8 @@
 
 状态：v1 已实施（#251：宿主只读 status RPC + better-sidebar tab）；后续增量（真实宿主冒烟 #253、切换器/下钻等）见 milestone `run-monitor-sidebar`。
 
+后续授权增量（#288）：下文 v1 的“严格只读”保留为原决定。现有 status 通道继续只读；另设仅接受宿主已鉴权浏览器身份的 `/workflow-run-model-config` 通道，只能原子更新明确选中未结束 Run 的普通 Role/Judge 主备配置，复用 #287 的未来派发状态机。工具/API peer 不因同为 owner 就取得人类写权限，不能伪造 Manager；不新增 resume/reset/推进/终止、模板写入或审计入口。现行使用见[用户手册](../user-guide.md#35-在运行监控中更新主备模型288)。
+
 向用户展示当前 Run 推进到哪个节点、各角色生效模型。载体是已安装的 DSH-better-sidebar 的扩展点 `ctx.betterSidebar.registerTab`（右侧栏 tab，`id: dsh-workflow:monitor`），不做独立浮窗、不占用原生主面板。本插件浏览器 bundle 用**动态注入**注册（不进静态 `inject` 导出）：未装 better-sidebar 时 tab 静默缺席，配置编辑器照常加载；这优于把三方宿主变成硬依赖。每个 tab 组件收到 `scope.cwd`（会话工作目录），经 canonical workspace 定位「一 workspace 一活跃 Run」。
 
 数据通道是插件宿主半新增的**只读 status RPC**（与编辑器 RPC 同一 webServer 挂载方式、同源鉴权），浏览器不做任何文件访问：不要求用户再走 File System Access API 授权目录。运行图数据源是 Run 启动时冻结的 Definition Snapshot 与 node_executions 状态投影（`ready|working|checking|settling|exited` + BLOCK 原因 + 重做 visit），不是当前 catalog YAML——Run 启动后改配置不得改变运行图。节点坐标读 catalog 目录 `<id>.layout.json`（与配置编辑器共用同一布局文件，宿主侧读取），缺失坐标沿用画布组件的网格兜底；坐标是纯展示数据，读取 live 文件不违反冻结。
