@@ -4,7 +4,7 @@ Issues and specs for this repo live as GitHub issues in `huaComPj/dsh-workflow-p
 
 ## Conventions
 
-Use non-interactive flags. For multi-line issue bodies, comments or PR descriptions, write the exact text to a temporary file and pass `--body-file`; preserve newlines and avoid shell interpolation. Do not print credentials or include sensitive logs in remote records.
+Use non-interactive flags. For multi-line issue bodies, comments or PR descriptions, write the exact text to a temporary file and pass `--body-file`; preserve newlines and avoid shell interpolation. After publishing, read back the exact resource and verify critical SHAs, hashes, links and the final paragraph; compare the complete body when an exact prepared text is available (normalize line endings, not content). A successful write response alone does not prove the body is intact. Do not print credentials or include sensitive logs in remote records.
 
 ```text
 gh issue create --repo huaComPj/dsh-workflow-plugin --title "..." --body-file <file>
