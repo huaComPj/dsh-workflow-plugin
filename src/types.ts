@@ -620,6 +620,8 @@ export interface NodeExecution {
   returned?: { kind: 'result' | 'return'; name: string; source: string }
   inputVersion: number
   blockReason: string | null
+  /** #294：有界白名单收口诊断；旧行缺省为未记录，历史以事件快照为准。 */
+  blockDiagnostic?: import('./engine/safety.ts').SafetyDiagnostic
   enteredAt: string
   exitedAt?: string
 }

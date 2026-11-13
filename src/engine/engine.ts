@@ -1,3 +1,4 @@
+import { inspectionStatus, inspectionDiagnostic, safetyDiagnostic, SAFETY_BLOCK_HINT, type SafetyDiagnostic, type SafeInspection } from './safety.ts'
 /** 唯一工作单 Runtime。SQLite CAS 保护短写；Host 调用始终在事务/锁之外。 */
 import type { WorkflowConfig, NodeClaim, NodeDef, Target, BuiltinProgramExecution, RunState, CallFrame, ClaimCaller, NodeContextBoundary, NodeExecution, ExecutionChange, NodeExecutionEvent, ExecutionDispatch, ExecutionJudge, ResumeTarget, ProgramResult } from '../types.ts'
 import { WorkflowError, LIMITS, compactBeforeReuse, declaredResults, nodeChecker, nodeOnReturn, nodeResults, normalizeModelRoute, normalizeNodeClaim, roleReuseMode, agentOptionsToRoute, readRoleDefModel, readRoleFallbackModel, roleKeysWithJudge, sameModelRoute, type SpawnAgentOptions, type DelegationRoute } from '../types.ts'
@@ -41,12 +42,16 @@ export type SessionAvailability = 'available' | 'missing' | 'unknown'
  * 闭合探针三态（#54）：`safe` 可安全结算；`waiting` 只表示"仍在跑的已知后代"这一
  * 唯一阻碍（等待中的正常空回合）；`unsafe` 收口未知，必须 fail-closed。
  */
-export type SafeInspection = 'safe' | 'waiting' | 'unsafe'
+export type { SafeInspection } from './safety.ts'
 /**
  * probeSessionIdle 的判定结果（#74）：`safe` = 探针即安全；`cold-safe` = 探针不安全
  * 但无可观测活动（冷会话）；`active` = 仍有活动；两种 stale = 对应阶段 CAS 复查失败。
  */
 export type SessionIdleVerdict = 'safe' | 'cold-safe' | 'safety-stale' | 'activity-stale' | 'active'
+class SafetyProbeError extends Error {
+  readonly diagnostic: SafetyDiagnostic
+  constructor(message: string, diagnostic: SafetyDiagnostic) { super(message); this.diagnostic = diagnostic }
+}
 /**
  * #243 D2：一次故障切换尝试的结果——调用点据此写收口文案，不再从「是否配置备用 /
  * 故障是否合格 / 当前阶段」三类事实重新推导（那三件事同一次尝试已经判定过）。
@@ -294,6 +299,8 @@ export class WorkflowEngine {
       execution: {
         executionId: execution.executionId, workflowId: execution.workflowId, nodeId: execution.nodeId,
         nodeToken: execution.nodeToken, visit: execution.visit, phase: execution.phase,
+        dispatchId: execution.dispatch?.id ?? null, claimId: execution.claim?.id ?? null, judgeId: execution.judge?.id ?? null,
+        blockDiagnostic: execution.blockDiagnostic ?? null,
         hasClaim: execution.claim !== undefined, claimResult: execution.claim?.result ?? null,
         declaredResults: declaredResults(node),
         returned: execution.returned ? { kind: execution.returned.kind, name: execution.returned.name } : null,
@@ -362,7 +369,7 @@ export class WorkflowEngine {
       }
       for (const sessionId of knownSessions) {
         let verdict: SessionIdleVerdict
-        try { verdict = await this.probeSessionIdle(sessionId, () => this.sameRow(ws, previous)) }
+        try { ({ verdict } = await this.probeSessionIdle(sessionId, () => this.sameRow(ws, previous))) }
         catch (error) { return rejected(error instanceof Error ? error.message : String(error)) }
         if (verdict === 'safety-stale') return rejected('workspace history changed during terminated Run safety inspection')
         if (verdict === 'activity-stale') return rejected('workspace history changed during terminated Run activity inspection')
@@ -512,9 +519,9 @@ export class WorkflowEngine {
             const sessionId = run.roleActors[role]
             // 冷会话（activity==='unknown'：无存活进程=无未收口执行）与 resume
             // 路径同等安全，直接放行；只有仍可观测到活动的会话才是 dispatch fault。
-            const verdict = await this.probeSessionIdle(sessionId, async () => (await this.stillCurrent(ws, e, arrangedVersion)) !== undefined)
+            const { verdict, diagnostic } = await this.probeSessionIdle(sessionId, async () => (await this.stillCurrent(ws, e, arrangedVersion)) !== undefined)
             if (verdict === 'safety-stale' || verdict === 'activity-stale') return
-            if (verdict === 'active') throw new WorkflowError('previous Role execution is not safely closed')
+            if (verdict === 'active') throw new SafetyProbeError('previous Role execution is not safely closed', diagnostic!)
           }
           if (!e.roleBoundaryPrepared) {
             // #198 唯一决策点：角色 `compactBeforeReuse` 关闭即跳过本次压缩调用，
@@ -612,11 +619,14 @@ export class WorkflowEngine {
   /**
    * whenIdle 挂起是派发/恢复路径的已知 seam（#21 F1）：safeToInspect 内部的
    * `agent.whenIdle()` 没有任何 signal 可用，只能放弃等待并让调用方降级。
-   * 等待状态（`waiting`）在恢复/派发路径上同样是"不干净"，按 fail-closed 折叠。
+   * 等待状态（`waiting`）在恢复/派发路径上同样是"不干净"，按 fail-closed 判定但保留诊断。
    */
-  private async whenIdleProbe(sessionId: string): Promise<'safe' | 'unsafe'> {
-    const result = await withTimeout(this.subagents.safeToInspect(sessionId), DISPATCH_TIMEOUTS.whenIdle, 'whenIdle')
-    return result === 'safe' ? 'safe' : 'unsafe'
+  private async whenIdleProbe(sessionId: string): Promise<SafeInspection> {
+    try { return await withTimeout(this.subagents.safeToInspect(sessionId), DISPATCH_TIMEOUTS.whenIdle, 'whenIdle') }
+    catch (error) {
+      const timeout = error instanceof DispatchTimeoutError
+      throw new SafetyProbeError(timeout ? error.message : 'safety probe failed', safetyDiagnostic(timeout ? 'probe_timeout' : 'probe_error', 'probe', { sessionId }))
+    }
   }
   /**
    * 「探针 → activity → CAS 复查」统一 helper（#74）：5 处复用同一顺序与判定——
@@ -624,24 +634,26 @@ export class WorkflowEngine {
    * 每次跨 await 后都经调用方 CAS 复查（`isFresh`），任一阶段过期即报对应 stale。
    * fail-closed 语义不变：各调用点的 stale/活动文案与失败动作仍由调用方决定。
    */
-  private async probeSessionIdle(sessionId: string, isFresh: () => Promise<boolean>): Promise<SessionIdleVerdict> {
+  private async probeSessionIdle(sessionId: string, isFresh: () => Promise<boolean>): Promise<{ verdict: SessionIdleVerdict; diagnostic?: SafetyDiagnostic }> {
     const safe = await this.whenIdleProbe(sessionId)
-    if (!await isFresh()) return 'safety-stale'
-    if (safe === 'safe') return 'safe'
+    if (!await isFresh()) return { verdict: 'safety-stale' }
+    if (inspectionStatus(safe) === 'safe') return { verdict: 'safe' }
+    const diagnostic = inspectionDiagnostic(safe, sessionId)
     const activity = await this.actorActivity(sessionId)
-    if (!await isFresh()) return 'activity-stale'
-    return activity === 'unknown' ? 'cold-safe' : 'active'
+    if (!await isFresh()) return { verdict: 'activity-stale' }
+    return { verdict: activity === 'unknown' ? 'cold-safe' : 'active', diagnostic }
   }
   /**
    * 探针超时=技术故障，不是"不安全"：降级为携带阶段名的 BLOCK 并返回 undefined；
-   * 其它错误保持原样抛出。调用方看到 undefined 即已 BLOCK，不得继续推进。
-   * 只有 turn/end 结算保留 `waiting` 三态；其余路径用 whenIdleProbe 折叠为二态。
+   * 其它探针异常只保存固定 probe_error，不投影原始异常。undefined 表示已 BLOCK。
+   * 只有 turn/end 结算保留 `waiting` 三态；其余路径由 probeSessionIdle 保持原二态判定。
    */
-  private async safetyProbe(ws: string, row: RuntimeRow, sessionId: string): Promise<SafeInspection | undefined> {
-    try { return await withTimeout(this.subagents.safeToInspect(sessionId), DISPATCH_TIMEOUTS.whenIdle, 'whenIdle') }
+  private async safetyProbe(ws: string, row: RuntimeRow, sessionId: string, dispatchId?: string): Promise<SafeInspection | undefined> {
+    try { return await this.whenIdleProbe(sessionId) }
     catch (error) {
-      if (!(error instanceof DispatchTimeoutError)) throw error
-      await this.blockRow(ws, row, error.message)
+      if (!(error instanceof SafetyProbeError)) throw error
+      const fresh = await this.stillCurrent(ws, row.execution, row.version)
+      if (fresh) await this.blockRow(ws, fresh, { reason: error.message, diagnostic: inspectionDiagnostic({ status: 'unsafe', diagnostic: error.diagnostic }, sessionId, dispatchId) })
     }
   }
   private async stillCurrent(ws: string, e: NodeExecution, version: number): Promise<RuntimeRow | undefined> {
@@ -672,7 +684,8 @@ export class WorkflowEngine {
     }
     // 本地候选安排可能尚未提交；只认最后成功提交的Run/visit/CAS版本。
     if (row?.run.status !== 'running' || row.run.runId !== e.runId || row.execution.executionId !== e.executionId || row.version !== committedVersion) return
-    await this.blockRow(ws, row, `dispatch fault: ${error instanceof Error ? error.message : String(error)}`)
+    const reason = `dispatch fault: ${error instanceof Error ? error.message : String(error)}`
+    await this.blockRow(ws, row, error instanceof SafetyProbeError ? { reason, diagnostic: error.diagnostic } : reason)
   }
   /**
    * Issue #203：节点 phase 变化时向 Manager 会话推送的结构化事件。
@@ -696,8 +709,10 @@ export class WorkflowEngine {
     return [
       `[node-event] phase=${e.phase} node=${e.workflowId}/${e.nodeId} run=${run.runId}`,
       `nodeToken=${e.nodeToken}`,
+      `executionId=${e.executionId} visit=${e.visit} dispatchId=${e.dispatch?.id ?? '-'} claimId=${e.claim?.id ?? '-'} judgeId=${e.judge?.id ?? '-'}`,
       `claimResult=${claimResult} judgment=${judgment} returned=${returned}`,
       `blockReason=${blockReason ? oneLine(blockReason, 200) : '-'}`,
+      ...(e.blockDiagnostic ? [`blockDiagnostic=${JSON.stringify(e.blockDiagnostic)}`] : []),
     ].join('\n')
   }
   private notifyNodeEvent(run: RunState, e: NodeExecution): Promise<void> {
@@ -714,12 +729,14 @@ export class WorkflowEngine {
   private async notifyBlock(run: RunState, e: NodeExecution, blockReason: string, hint: string): Promise<void> {
     await this.targets.steerManager(run, `${this.nodeEventText(run, e)}\nWorkflow BLOCK: ${blockReason}\n${hint}`).catch(() => {})
   }
-  private async blockRow(ws: string, row: RuntimeRow, reason: string, ...beforeBlock: NodeExecutionEvent['type'][]): Promise<void> {
+  private async blockRow(ws: string, row: RuntimeRow, reason: string | { reason: string; diagnostic: SafetyDiagnostic }, ...beforeBlock: NodeExecutionEvent['type'][]): Promise<void> {
     row.run.status = 'blocked'
-    row.execution.blockReason = this.blockReason(reason)
+    row.execution.blockReason = this.blockReason(typeof reason === 'string' ? reason : reason.reason)
+    if (typeof reason === 'string') delete row.execution.blockDiagnostic
+    else row.execution.blockDiagnostic = reason.diagnostic
     await this.state.put(ws, row.run, row.version, [change(row.execution, ...beforeBlock, 'blocked')])
     this.trace(row.run, 'BLOCK', { workflow: row.execution.workflowId, node: row.execution.nodeId, reason: jsonField(row.execution.blockReason, LIMITS.blockReasonMax) })
-    await this.notifyBlock(row.run, row.execution, row.execution.blockReason, '材料已保存；Manager 可查看 status 后选择恢复目标。')
+    await this.notifyBlock(row.run, row.execution, row.execution.blockReason, row.execution.blockDiagnostic ? SAFETY_BLOCK_HINT : '材料已保存；Manager 可查看 status 后选择恢复目标。')
   }
   /**
    * Issue #200：Judge 瞬时失败的单次自动重试。fresh 新会话重派（失败会话状态
@@ -803,6 +820,7 @@ export class WorkflowEngine {
     const target: Target | undefined = kind === 'result' ? resultDefOf(node, name)?.target : { return: name }
     if (!target) {
       e.phase = 'settling'
+      delete e.blockDiagnostic
       e.blockReason = this.blockReason(`result "${name}" has no configured Target`)
       run.status = 'blocked'
       await this.state.put(ws, run, version, [change(e, ...events, 'blocked')])
@@ -1004,6 +1022,7 @@ export class WorkflowEngine {
         result, reason, claimId: e.claim.id, judgeDispatchId: judge.id,
         judgeSessionId: judge.sessionId!, inputVersion: judge.inputVersion,
       }
+      delete e.blockDiagnostic
       e.blockReason = this.blockReason(`Judge NEED_CONTEXT: ${reason}`)
       run.status = 'blocked'
       await this.state.put(ws, run, version, [change(e, 'judgment', 'blocked')])
@@ -1042,13 +1061,13 @@ export class WorkflowEngine {
       const predecessor = await this.state.execution(ws, e.predecessorId)
       const transfer = predecessor === undefined ? undefined : await this.transferJudge(ws, predecessor)
       if (!transfer || !matches(transfer.judge, caller) || transfer.judge.settled) return
-      const settledSafe = await this.safetyProbe(ws, row, caller.sessionId)
+      const settledSafe = await this.safetyProbe(ws, row, caller.sessionId, transfer.judge.id)
       if (settledSafe === undefined) return
       // #54：Judge 结算路径没有"等待并行子代理"语义——waiting 在此仍是收口未知，
       // 与 unsafe 同样 BLOCK（本 PR 未改变该行为，仅保留折叠）。
-      if (settledSafe !== 'safe') { await this.blockRow(ws, row, 'Judge/known tools not safely closed'); return }
-      const fresh = await this.state.get(ws)
-      if (!fresh || fresh.version !== row.version || fresh.execution.executionId !== e.executionId) return
+      const fresh = await this.stillCurrent(ws, e, row.version)
+      if (!fresh) return
+      if (inspectionStatus(settledSafe) !== 'safe') { await this.blockRow(ws, fresh, { reason: 'Judge/known tools not safely closed', diagnostic: inspectionDiagnostic(settledSafe, caller.sessionId, transfer.judge.id) }); return }
       transfer.judge.settled = true
       await this.state.put(ws, fresh.run, fresh.version, [change(transfer.owner)])
       this.forgetDispatch(caller.sessionId, transfer.judge.id)
@@ -1058,7 +1077,7 @@ export class WorkflowEngine {
     const actor = matches(e.dispatch, caller) && !e.dispatch!.settled
     const judge = matches(e.judge, caller) && !e.judge!.settled
     if (!actor && !judge) return
-    const safe = await this.safetyProbe(ws, row, caller.sessionId)
+    const safe = await this.safetyProbe(ws, row, caller.sessionId, actor ? e.dispatch!.id : e.judge!.id)
     if (safe === undefined) return
     const fresh = await this.stillCurrent(ws, e, row.version)
     if (!fresh) return
@@ -1069,8 +1088,8 @@ export class WorkflowEngine {
     // turn 自恢复"兜底因此不需要）。
     // ponytail: 只覆盖"期望中的等待"；子代理永不 settle 时 Run 留在 working，
     // 由 Manager 经 workflow_status + node_block/node_resume 兜底，不做等待超时。
-    if (safe === 'waiting') return
-    if (safe === 'unsafe') { await this.blockRow(ws, fresh, 'Actor/Judge or known tools not safely closed'); return }
+    if (inspectionStatus(safe) === 'waiting') return
+    if (inspectionStatus(safe) === 'unsafe') { await this.blockRow(ws, fresh, { reason: 'Actor/Judge or known tools not safely closed', diagnostic: inspectionDiagnostic(safe, caller.sessionId, actor ? e.dispatch!.id : e.judge!.id) }); return }
     if (actor && e.phase === 'checking') {
       e.dispatch!.settled = true
       await this.state.put(ws, fresh.run, fresh.version, [change(e)])
@@ -1361,6 +1380,7 @@ export class WorkflowEngine {
       e.resolution = { target: 'child', context, inputVersion: e.inputVersion }
       e.restartPending = false
       e.blockReason = null
+      delete e.blockDiagnostic
       e.nodeToken = newNodeToken()
       topFrame(run).nodeToken = e.nodeToken
       run.status = 'running'
@@ -1377,7 +1397,7 @@ export class WorkflowEngine {
     let replaceRole = false
     if (role !== 'manager' && run.roleActors[role] && (resolvedTarget === 'actor' || !e.dispatch?.settled)) {
       const sessionId = run.roleActors[role]
-      const verdict = await this.probeSessionIdle(sessionId, () => this.sameRow(ws, row))
+      const { verdict } = await this.probeSessionIdle(sessionId, () => this.sameRow(ws, row))
       if (verdict === 'safety-stale') return rejected('stale resume request after Role safety inspection')
       if (verdict === 'activity-stale') return rejected('stale resume request after Role activity inspection')
       if (verdict === 'active') return rejected('previous Role execution is not safely closed')
@@ -1416,7 +1436,7 @@ export class WorkflowEngine {
         const availability = await this.subagents.judgeSessionAvailability(judgeToContinue.sessionId)
         if (!await this.sameRow(ws, row)) return rejected('stale judge resume request after Judge Session inspection')
         if (availability !== 'missing') {
-          const verdict = await this.probeSessionIdle(judgeToContinue.sessionId, () => this.sameRow(ws, row))
+          const { verdict } = await this.probeSessionIdle(judgeToContinue.sessionId, () => this.sameRow(ws, row))
           if (verdict === 'safety-stale') return rejected('stale judge resume request after Judge safety inspection')
           if (verdict === 'activity-stale') return rejected('stale judge resume request after Judge activity inspection')
           // 原条件 !restartRecovery || activity !== 'unknown'：探针 safe 直接放行；
@@ -1499,6 +1519,7 @@ export class WorkflowEngine {
     }
     e.restartPending = false
     e.blockReason = null
+    delete e.blockDiagnostic
     e.nodeToken = newNodeToken()
     topFrame(run).nodeToken = e.nodeToken
     run.status = 'running'
@@ -1548,6 +1569,7 @@ export class WorkflowEngine {
       // Issue #200：Manager 显式重建是新的人工尝试，自动重试预算重置。
       delete e.judgeAutoRetried
       e.blockReason = null
+      delete e.blockDiagnostic
       run.status = 'running'
       run.blockReason = null
       await this.state.put(ws, run, version, [change(e, 'judge-respawned', 'judge-arranged')])
@@ -1591,6 +1613,7 @@ export class WorkflowEngine {
     e.phase = 'working'
     e.restartPending = false
     e.blockReason = null
+    delete e.blockDiagnostic
     run.status = 'running'
     run.blockReason = null
     await this.state.put(ws, run, row.version, [change(e, 'program-arranged')])
@@ -1651,6 +1674,7 @@ export class WorkflowEngine {
     const handoff = prior && prior.kind !== 'ERROR' ? prior.handoff : row.execution.input
     row.execution.program.result = { kind: result, handoff, reason }
     row.execution.blockReason = null
+    delete row.execution.blockDiagnostic
     row.execution.restartPending = false
     row.run.status = 'running'
     row.run.blockReason = null
@@ -1756,6 +1780,7 @@ export class WorkflowEngine {
     row.run.status = 'terminated'
     row.run.blockReason = TERMINATED_REASON
     row.execution.restartPending = false
+    delete row.execution.blockDiagnostic
     row.execution.blockReason = TERMINATED_REASON
     row.execution.nodeToken = newNodeToken()
     topFrame(row.run).nodeToken = row.execution.nodeToken

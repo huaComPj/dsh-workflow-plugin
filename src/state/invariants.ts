@@ -1,5 +1,6 @@
 /** Run / 工作单的持久化边界；坏材料不交给 Runtime 猜测恢复。 */
 import { randomUUID } from 'node:crypto'
+import { safetyDiagnosticSchema } from '../engine/safety.ts'
 import { z } from 'zod'
 import { workflowConfigSchema } from '../catalog/schema.ts'
 import { computeDefinitionHash } from '../catalog/validate.ts'
@@ -80,6 +81,7 @@ const executionSchema = z.object({
     workflowId: text, executionId: text,
     result: z.object({ terminalExecutionId: text, handoff: z.string().trim().min(1).max(LIMITS.handoffMax) }).strict().optional(),
   }).strict().optional(),
+  blockDiagnostic: safetyDiagnosticSchema.optional(),
   inputVersion: revision, blockReason: text.nullable(), enteredAt: z.iso.datetime(), exitedAt: z.iso.datetime().optional(),
   /**
    * v3：本工作单退出时实际裁决的终局名。`result` = 节点结果名（节点退出），

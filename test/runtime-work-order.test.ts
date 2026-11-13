@@ -112,6 +112,7 @@ function harness(config: import('../src/types.ts').WorkflowConfig = CONFIG) {
   let roleDrainFailure: Error | undefined
   let roleSerial = 0
   let safe = true
+  let inspection: import('../src/engine/safety.ts').SafeInspection | undefined
   // #54: explicit probe override for the waiting regression.
   let sessionSafety: 'waiting' | undefined
   let lastJudgeSession = ''
@@ -172,7 +173,7 @@ function harness(config: import('../src/types.ts').WorkflowConfig = CONFIG) {
     // 每次 fresh spawn 都是新 child：节点级复用（reuse: node）的「再次进入节点」必须可区分。
     async ensureRoleActor(_run, _role, text, model) { const childId = roleSerial++ === 0 ? 'worker-session' : `worker-session-${roleSerial}`; return { ...await queueRole(childId, text, model), childId } },
     async startJudge(_run, input) { judges.push(input); lastJudgeSession = input.judgeSessionId; if (judgeFailure) throw judgeFailure; await waitJudgeQueue(); return { ...send(input.judgeSessionId, 'Judge'), judgeSessionId: input.judgeSessionId } },
-    async safeToInspect(sessionId) { lifecycle.push(`safe:${sessionId}`); if (safetyGate && gatedSession === sessionId) await safetyGate; if (sessionSafety) return sessionSafety; return safe && !unsafeSessions.has(sessionId) ? 'safe' : 'unsafe' },
+    async safeToInspect(sessionId) { lifecycle.push(`safe:${sessionId}`); if (safetyGate && gatedSession === sessionId) await safetyGate; if (inspection) return inspection; if (sessionSafety) return sessionSafety; return safe && !unsafeSessions.has(sessionId) ? 'safe' : 'unsafe' },
     async retireJudge() {}, async drainJudge(_run, judgeSessionId) { drains.push(judgeSessionId); drainEntered?.(); if (drainGate) await drainGate; if (drainFailure) throw drainFailure },
     async drainRoleActor(run, role) { roleDrains.push(run.roleActors[role]!); lifecycle.push(`drain:${role}`); const waiting = roleDrainGate; roleDrainGate = undefined; if (waiting) { waiting.entered(); await waiting.gate }; if (roleDrainFailure) throw roleDrainFailure },
     async compactRoleActor(_run, role) { compacts.push(role); lifecycle.push(`compact:${role}`); compactEntered?.(); if (compactGate) await compactGate; return compactOutcome },
@@ -190,6 +191,7 @@ function harness(config: import('../src/types.ts').WorkflowConfig = CONFIG) {
     setRoleDrainGate(gate: Promise<void>, entered: () => void) { roleDrainGate = { gate, entered } },
     setProgramRun(implementation: import('../src/engine/engine.ts').ProgramHost['run']) { programRun = implementation },
     setSafe(value: boolean | 'waiting') { if (value === 'waiting') { sessionSafety = 'waiting'; return } sessionSafety = undefined; safe = value === true; if (value) unsafeSessions.clear(); else for (const id of ['manager', 'worker-session', lastJudgeSession]) unsafeSessions.add(id) },
+    setInspection(value: import('../src/engine/safety.ts').SafeInspection | undefined) { inspection = value },
     setSessionUnsafe(sessionId: string, value: boolean) { if (value) unsafeSessions.add(sessionId); else unsafeSessions.delete(sessionId) },
     setCompactOutcome(value: { ok: boolean; detail?: string }) { compactOutcome = value },
     setCompactGate(gate: Promise<void> | undefined, onEntered?: () => void) { compactGate = gate; compactEntered = onEntered },
@@ -1444,6 +1446,7 @@ test('#21 F1: every dispatch-path seam timeout BLOCKs with its stage name instea
         const blocked = await h.row()
         assert.equal(blocked.run.status, 'blocked', stage)
         assert.equal(blocked.execution.phase, 'working', stage)
+        if (stage === 'whenIdle') assert.equal(blocked.execution.blockDiagnostic?.reasonCode, 'probe_timeout')
         assert.match(blocked.execution.blockReason!, new RegExp(`timeout after \\d+ms at stage "${stage}"`))
       } finally { h.close() }
     }
@@ -2392,4 +2395,104 @@ test('restart reconciliation contains one workspace CAS failure and continues th
     assert.equal((await store.get('ws-b'))!.run.status, 'blocked')
     assert.equal((await store.get('ws-b'))!.execution.restartPending, true)
   } finally { store.close(); rmSync(home, { recursive: true, force: true }) }
+})
+
+
+test('#294：同一收口诊断持久化并投影到 status 与唯一 Manager 通知，显式 Judge 恢复续原 claim', async () => {
+  const h = harness()
+  try {
+    await h.start()
+    const row = (await h.row()).execution!
+    await h.engine.handleClaim('ws', { result: 'succeeded', handoff: 'original claim' }, h.caller(row.dispatch!))
+    const pending = (await h.row()).execution!
+    const diagnostic = { reasonCode: 'job_active', type: 'job', sessionId: row.dispatch!.sessionId, jobId: 'job-294', owner: row.dispatch!.sessionId, state: 'stopping' } as const
+    h.setInspection({ status: 'unsafe', diagnostic })
+    const notifications = () => h.messages.filter(message => message.text.includes('Workflow BLOCK:'))
+    await h.engine.handleTurnEnded('ws', h.caller(row.dispatch!))
+    const blocked = (await h.row()).execution!
+    assert.equal((await h.row()).run.status, 'blocked')
+    assert.equal(blocked.phase, 'checking')
+    assert.equal(h.judges.length, 0)
+    const expected = { ...diagnostic, dispatchId: row.dispatch!.id }
+    assert.deepEqual(blocked.blockDiagnostic, expected)
+    const status = await h.engine.status('ws')
+    assert.deepEqual(status.status!.execution!.blockDiagnostic, expected)
+    assert.equal(status.status!.execution!.dispatchId, row.dispatch!.id)
+    assert.equal(status.status!.execution!.claimId, pending.claim!.id)
+    const event = (await h.store.events('ws', blocked.executionId)).filter(event => event.type === 'blocked').at(-1)!
+    assert.deepEqual(event.snapshot.blockDiagnostic, expected)
+    assert.equal(notifications().length, 1)
+    const notice = notifications()[0]!.text
+    for (const value of [blocked.executionId, String(blocked.visit), row.dispatch!.id, pending.claim!.id, 'job_active', 'job-294', 'stopping']) assert.ok(notice.includes(value))
+    await h.engine.handleTurnEnded('ws', h.caller(row.dispatch!))
+    assert.equal(notifications().length, 1)
+    h.setInspection('safe')
+    await h.engine.handleResume('ws', blocked.nodeToken, 'owner confirms closure', 'manager', 'judge')
+    assert.equal(h.judges.length, 1)
+    const resumed = (await h.row()).execution!
+    assert.equal(resumed.claim!.id, pending.claim!.id)
+    assert.equal(resumed.blockDiagnostic, undefined)
+    await h.engine.handleTurnEnded('ws', h.caller(row.dispatch!))
+    assert.equal(h.judges.length, 1)
+    assert.equal((await h.row()).execution!.judge!.id, resumed.judge!.id)
+  } finally { h.close() }
+})
+
+
+test('#294：缺诊断旧行可读；working 无 judgment 仍有精确对象并可重开读取', async () => {
+  const h = harness()
+  try {
+    await h.start()
+    const old = (await h.row()).execution
+    assert.equal(old.blockDiagnostic, undefined)
+    const legacy = await h.engine.status('ws')
+    assert.equal(legacy.status!.execution!.blockDiagnostic, null)
+    h.setInspection({ status: 'unsafe', diagnostic: { reasonCode: 'inbox_pending', type: 'session', sessionId: old.dispatch!.sessionId, state: 'idle' } })
+    await h.engine.handleTurnEnded('ws', h.caller(old.dispatch!))
+    const blocked = (await h.row()).execution
+    const status = await h.engine.status('ws')
+    const execution = status.status!.execution!
+    assert.equal(execution.phase, 'working')
+    assert.equal(execution.judgment, null)
+    assert.equal(execution.executionId, old.executionId)
+    assert.equal(execution.dispatchId, old.dispatch!.id)
+    assert.equal(execution.claimId, null)
+    assert.deepEqual(execution.blockDiagnostic, blocked.blockDiagnostic)
+    assert.ok(h.messages.at(-1)!.text.includes('executionId=' + old.executionId))
+    assert.ok(h.messages.at(-1)!.text.includes('claimId=-'))
+    const reopened = new StateStore(h.home)
+    try { assert.deepEqual((await reopened.get('ws'))!.execution.blockDiagnostic, blocked.blockDiagnostic) } finally { reopened.close() }
+  } finally { h.close() }
+})
+
+
+test('#294：探针异常与前驱 Judge 超时保持脱敏诊断和精确派发身份', async () => {
+  const h = harness(configWithWorker('work'))
+  try {
+    await h.start()
+    const actor = h.caller((await h.row()).execution.dispatch!)
+    await h.engine.handleClaim('ws', { result: 'succeeded', handoff: 'plan ready' }, actor)
+    await h.engine.handleTurnEnded('ws', actor)
+    const row = await h.row()
+    const judge = h.caller(row.execution.judge!)
+    await h.engine.handleJudgeClaim('ws', row.execution.nodeToken, 'ACCEPT', 'verified', judge)
+    h.setSafetyGate(judge.sessionId, new Promise<never>(() => {}))
+    await withShortTimeouts({ whenIdle: 10 }, () => h.engine.handleTurnEnded('ws', judge))
+    const blocked = await h.row()
+    assert.equal(blocked.run.status, 'blocked')
+    assert.deepEqual(blocked.execution.blockDiagnostic, { reasonCode: 'probe_timeout', type: 'probe', sessionId: judge.sessionId, dispatchId: row.execution.judge!.id })
+  } finally { h.close() }
+  const failure = harness()
+  try {
+    await failure.start()
+    const row = await failure.row()
+    failure.setSafetyGate(row.execution.dispatch!.sessionId!, Promise.reject(new Error('secret=never-output https://private.invalid prompt body')))
+    await failure.engine.handleTurnEnded('ws', failure.caller(row.execution.dispatch!))
+    const blocked = await failure.row()
+    assert.equal(blocked.run.status, 'blocked')
+    assert.equal(blocked.execution.blockDiagnostic?.reasonCode, 'probe_error')
+    assert.equal(blocked.execution.blockDiagnostic?.dispatchId, row.execution.dispatch!.id)
+    const status = await failure.engine.status('ws')
+    assert.doesNotMatch(JSON.stringify([status, failure.messages]), /never-output|private.invalid|prompt body/)
+  } finally { failure.close() }
 })

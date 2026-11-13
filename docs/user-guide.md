@@ -395,6 +395,15 @@ GitHub 列表按 `per_page=100` 翻页取全、PR 从 issues 结果中排除；�
   compactNow → dispose），token 得以受控但派发前有额外时延。
 - BLOCK：Actor 主动 `node_block`，或技术故障（Judge fault 等）自动进入；
   Manager 用 `node_resume` 恢复。
+- **安全收口诊断（#294）**：安全探针导致的 BLOCK 在事件快照、`workflow_status.execution.blockDiagnostic`
+  与单条 Manager 通知中投影同一有界诊断：稳定 `reasonCode`、`type`，以及可确认的
+  `sessionId` / `dispatchId` / `jobId` / `owner` / `state`。无合法完整标识时省略该键并标记
+  `identityUnavailable`，不截断成可操作 ID；不输出异常正文、队列、prompt 或 job detail。
+  通知始终附 `executionId`、`visit`、`phase` 与可用 dispatch/claim/Judge ID，即使尚无判定。
+  `job_active` / `job_orphaned`、代际变化或探针异常仍 fail-closed；预期的已知后代等待不改为 BLOCK。
+  诊断仅提示等待、联系原 owner 或核实，不授权自动 resume/kill。确认闭包后仍由 Manager
+  显式选择恢复目标；已保存 claim 不等于旧执行已收口。旧行无该可选字段时显示未记录，
+  新版可读旧行；旧版 strict schema 不保证反向读取含新字段的快照，不宣称双向无损回滚。
 - **模型更新生效点（#287）**：固定 Manager 可在普通 Role 活动时保存下次派发配置，
   不要求先 BLOCK，不中断旧 turn、不删会话映射；更新后新登记的 Dispatch 才使用新主。
   新建、同 Session 热复用、Judge followup 与冷物化都消费该次登记的模型快照。

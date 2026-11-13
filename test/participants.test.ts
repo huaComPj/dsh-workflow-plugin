@@ -1,3 +1,4 @@
+import { inspectionStatus } from '../src/engine/safety.ts'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -33,7 +34,7 @@ function harness(rows: Array<[string, WorkOrderFacts]> = []) {
   const rowMap = new Map(rows)
   const agents = new Map<string, Agent>()
   const descendants = new Map<string, unknown[]>()
-  const jobs: Array<{ status: string; owner?: string; detail?: string }> = []
+  const jobs: Array<{ id?: string; status: string; owner?: string; detail?: string }> = []
   const probes: string[] = []
   const scans: string[] = []
   type SettledEvent = { type: 'settled'; job: { owner?: string; detail?: string }; cause: string }
@@ -206,21 +207,21 @@ test('#99 AC2：同 Session ID 的另一代 Agent 不共享证据；宿主自然
   h.agents.set('role-a', first)
   h.index.rememberRole('role-a', 'worker', 'C:/ws')
   h.index.observeTurnEnd('role-a')
-  assert.equal(await h.index.safeToInspect('role-a'), 'safe')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('role-a')), 'safe')
 
   // 宿主自然 dispose：registry 里没有这一代了，但精确引用仍在 → 仍能判定收口。
   h.agents.delete('role-a')
-  assert.equal(await h.index.safeToInspect('role-a'), 'safe', 'recorded exact Agent survives cold release')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('role-a')), 'safe', 'recorded exact Agent survives cold release')
 
   // 同 id 换成另一代：不得拿旧一代的证据给新一代背书，fail-closed。
   const second = mkAgent('role-a')
   h.agents.set('role-a', second)
-  assert.equal(await h.index.safeToInspect('role-a'), 'unsafe', 'a different live generation is not this generation evidence')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('role-a')), 'unsafe', 'a different live generation is not this generation evidence')
 
   // 新一代自己的 turn/end 才重新定格事实，并且此后只认这一代。
   h.index.observeTurnEnd('role-a')
   h.agents.delete('role-a')
-  assert.equal(await h.index.safeToInspect('role-a'), 'safe')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('role-a')), 'safe')
 })
 
 test('#99 AC4：orphan 证据跨 descriptor/job 行消失存活，且只由插件卸载清空', async () => {
@@ -229,14 +230,14 @@ test('#99 AC4：orphan 证据跨 descriptor/job 行消失存活，且只由插�
   const branch = mkAgent('branch', { parent: 'actor' })
   const leaf = mkAgent('leaf', { parent: 'branch' })
   for (const agent of [actor, branch, leaf]) h.agents.set(agent.id, agent)
-  assert.equal(await h.index.safeToInspect('actor'), 'safe')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('actor')), 'safe')
 
   // 后代 descriptor 消失 + middle Agent 不可观测之后，orphan 事实仍必须钉住父 Role。
   h.orphan(leaf)
   h.descendants.set('actor', [])
   h.agents.delete('branch')
   h.agents.delete('leaf')
-  assert.equal(await h.index.safeToInspect('actor'), 'unsafe', 'known ancestry survives an unavailable middle Agent')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('actor')), 'unsafe', 'known ancestry survives an unavailable middle Agent')
 
   // job 行消失不能洗白；无关 churn 的释放也不能洗掉 tombstone。
   h.jobs.length = 0
@@ -245,14 +246,14 @@ test('#99 AC4：orphan 证据跨 descriptor/job 行消失存活，且只由插�
   await h.index.resolveTurn('stranger', 'C:/elsewhere')
   assert.equal(h.index.stats().releaseUnrelated, 1)
   assert.equal(h.index.stats().tombstones, 3, 'actor/branch/leaf 三代都保留 tombstone')
-  assert.equal(await h.index.safeToInspect('actor'), 'unsafe', 'removing job snapshots cannot erase orphan evidence')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('actor')), 'unsafe', 'removing job snapshots cannot erase orphan evidence')
 
   // Reset 后新 start 也不能继承旧结论：证据只在插件卸载时清空，且清空后不再给 pass。
   h.dispose()
   assert.equal(h.index.stats().exactAgents, 0)
   assert.equal(h.index.stats().tombstones, 0)
   h.agents.delete('actor')
-  assert.equal(await h.index.safeToInspect('actor'), 'unsafe', 'disposal releases retained references; nothing grants a pass afterwards')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('actor')), 'unsafe', 'disposal releases retained references; nothing grants a pass afterwards')
 })
 
 test('#190 三重匹配：teardown 抛错结算进 tombstone，普通 teardown 与 producer/kill 不误判', async () => {
@@ -263,19 +264,19 @@ test('#190 三重匹配：teardown 抛错结算进 tombstone，普通 teardown �
 
   // 合规 teardown 结算（cancel 未抛错，无 orphan 子串）：不起因不算，只缺子串即放行。
   h.settled('teardown', undefined, 'actor')
-  assert.equal(await h.index.safeToInspect('actor'), 'safe', 'plain teardown settlement without the orphan detail is not an orphan')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('actor')), 'safe', 'plain teardown settlement without the orphan detail is not an orphan')
 
   // producer/kill 结算即使带上可疑 detail：起因不对，一律不误判。
   h.settled('producer', 'cancel threw during teardown; work may be orphaned: late flush', 'actor')
-  assert.equal(await h.index.safeToInspect('actor'), 'safe', 'producer settlement is never an orphan')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('actor')), 'safe', 'producer settlement is never an orphan')
   h.settled('kill', 'cancel threw during teardown; work may be orphaned: race', 'actor')
-  assert.equal(await h.index.safeToInspect('actor'), 'safe', 'kill settlement is never an orphan')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('actor')), 'safe', 'kill settlement is never an orphan')
   assert.equal(h.index.stats().tombstones, 0, '误判场景不得建 tombstone')
 
   // teardown 抛错结算：三重全中，进 tombstone。
   h.settled('teardown', 'cancel threw during teardown; work may be orphaned: boom', 'actor')
   assert.equal(h.index.stats().tombstones, 1)
-  assert.equal(await h.index.safeToInspect('actor'), 'unsafe', 'teardown-throw settlement enters the tombstone')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('actor')), 'unsafe', 'teardown-throw settlement enters the tombstone')
 })
 
 test('#99 AC3：后代 pending inbox / 非终态 job 仍让收口 fail-closed（判据未被寿命改造削弱）', async () => {
@@ -288,15 +289,15 @@ test('#99 AC3：后代 pending inbox / 非终态 job 仍让收口 fail-closed（
   ])
   const child = mkAgent('child', { parent: 'actor', pendingInbox: true })
   h.agents.set('child', child)
-  assert.equal(await h.index.safeToInspect('actor'), 'waiting', '唯一阻碍是仍在跑的已知后代 = 等待')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('actor')), 'waiting', '唯一阻碍是仍在跑的已知后代 = 等待')
 
   h.jobs.push({ status: 'stopping', owner: 'actor' })
-  assert.equal(await h.index.safeToInspect('actor'), 'unsafe', '未终态 job 仍是收口未知')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('actor')), 'unsafe', '未终态 job 仍是收口未知')
   h.jobs.length = 0
   h.descendants.set('actor', [
     { kind: 'diagnostic', id: 'child', parentId: 'actor', depth: 1 },
   ])
-  assert.equal(await h.index.safeToInspect('actor'), 'unsafe', 'diagnostic 后代一律 fail-closed')
+  assert.equal(inspectionStatus(await h.index.safeToInspect('actor')), 'unsafe', 'diagnostic 后代一律 fail-closed')
 })
 
 test('#99 寿命边界：探针失败不是"可释放"的证据（fail-closed 保留）', async () => {
@@ -316,4 +317,62 @@ test('#99 寿命边界：探针失败不是"可释放"的证据（fail-closed �
   await assert.rejects(index.resolveTurn('actor', 'C:/ws'), /store read failed/)
   assert.equal(index.stats().exactAgents, 1, '读工作单失败时保留证据，不当作无关 Session 释放')
   assert.equal(index.stats().releaseUnrelated, 0)
+})
+test('#294：waiting 后代不能掩盖 owner job，诊断只携带有界标识与状态', async () => {
+  const h = harness()
+  h.agents.set('actor', mkAgent('actor'))
+  h.agents.set('child', mkAgent('child', { parent: 'actor', status: 'running' }))
+  h.descendants.set('actor', [{ kind: 'child', id: 'child', parentId: 'actor', activity: 'running' }])
+  h.jobs.push({ id: 'job-294', status: 'stopping', owner: 'actor', detail: 'secret=never-output https://private.invalid prompt body' })
+  assert.deepEqual(await h.index.safeToInspect('actor'), {
+    status: 'unsafe', diagnostic: { reasonCode: 'job_active', type: 'job', sessionId: 'actor', jobId: 'job-294', owner: 'actor', state: 'stopping' },
+  })
+})
+test('#294：busy/inbox/diagnostic/代际/异常分别给出稳定且脱敏的原因', async () => {
+  const check = async (h: ReturnType<typeof harness>, code: string) => {
+    const result = await h.index.safeToInspect('actor')
+    assert.equal(typeof result, 'object')
+    if (typeof result === 'string') throw new Error('missing diagnostic')
+    assert.equal(result.diagnostic.reasonCode, code)
+    assert.equal(result.status, 'unsafe')
+    assert.doesNotMatch(JSON.stringify(result), /private|never-output|prompt|body|secret=/)
+  }
+  const h = harness()
+  await check(h, 'session_missing')
+  h.agents.set('actor', mkAgent('actor', { status: 'running' }))
+  await check(h, 'session_busy')
+  h.agents.set('actor', mkAgent('actor', { pendingInbox: true }))
+  await check(h, 'inbox_pending')
+  h.agents.set('actor', mkAgent('actor'))
+  h.descendants.set('actor', [{ kind: 'diagnostic', id: 'child', parentId: 'actor', reason: 'secret=never-output https://private.invalid prompt body' }])
+  await check(h, 'descendant_diagnostic')
+  h.descendants.clear()
+  h.index.observeTurnEnd('actor')
+  h.agents.set('actor', mkAgent('actor'))
+  await check(h, 'generation_changed')
+  h.index.observeTurnEnd('actor')
+  h.jobs.push({ id: 'job-orphan', status: 'failed', owner: 'actor', detail: 'work may be orphaned: secret=never-output' })
+  await check(h, 'job_orphaned')
+  h.jobs.length = 0
+  h.orphan(h.agents.get('actor')!)
+  await check(h, 'orphan_tombstone')
+  const bad = harness()
+  bad.agents.set('actor', mkAgent('actor', { whenIdle: async () => { throw new Error('secret=never-output https://private.invalid prompt body') } }))
+  await check(bad, 'probe_error')
+})
+
+test('#294：不完整或含凭据的对象标识不截断成貌似精确的 ID', async () => {
+  const h = harness()
+  h.agents.set('actor', mkAgent('actor'))
+  for (const id of ['x'.repeat(129), 'ghp_123456789secret', 'https://private.invalid']) {
+    h.jobs.splice(0, h.jobs.length, { id, owner: 'actor', status: 'running' })
+    assert.deepEqual(await h.index.safeToInspect('actor'), { status: 'unsafe', diagnostic: {
+      reasonCode: 'job_active', type: 'job', sessionId: 'actor', owner: 'actor', state: 'running', identityUnavailable: true,
+    } })
+  }
+})
+test('#294：首个 registry 探针抛错也不泄露异常或失去 fail-closed', async () => {
+  const h = harness()
+  h.agents.get = () => { throw new Error('secret=never-output https://private.invalid') }
+  assert.deepEqual(await h.index.safeToInspect('actor'), { status: 'unsafe', diagnostic: { reasonCode: 'probe_error', type: 'probe', sessionId: 'actor' } })
 })

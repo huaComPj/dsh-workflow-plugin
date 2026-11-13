@@ -348,6 +348,7 @@ workflow:
     const adapters: HostAdapters = { ctx, managerAgentOf: () => manager, presets: new RolePresetBook(),
       registerRoleActorSession() {}, registerJudgeSession() {}, revokeJudgeSession() {} }
     const host = makeSubagentHost(adapters, testParticipants(ctx))
+    assert.deepEqual(await host.safeToInspect('a294-missing-session'), { status: 'unsafe', diagnostic: { reasonCode: 'session_missing', type: 'session', sessionId: 'a294-missing-session' } }, '#294 structured diagnostic survives the production Host → participants adapter with real services')
     const targets = makeDispatchTargets(adapters)
     const first = await host.ensureRoleActor(run, 'worker', 'A287 FIRST_DISPATCH', { provider: MODEL, modelId: 'model-a', reasoningEffort: 'high' })
     run.roleActors.worker = first.childId
