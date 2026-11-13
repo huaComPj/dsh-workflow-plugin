@@ -37,7 +37,7 @@ function harness(rows: Array<[string, WorkOrderFacts]> = []) {
   const jobs: Array<{ id?: string; status: string; owner?: string; detail?: string }> = []
   const probes: string[] = []
   const scans: string[] = []
-  type SettledEvent = { type: 'settled'; job: { owner?: string; detail?: string }; cause: string }
+  type SettledEvent = { type: 'settled'; job: { id?: string; status?: string; owner?: string; detail?: string }; cause: string }
   let onSettled: ((event: SettledEvent) => void) | undefined
   let dispose: (() => void) | undefined
   const index = makeParticipantIndex({
@@ -61,6 +61,7 @@ function harness(rows: Array<[string, WorkOrderFacts]> = []) {
   })
   return {
     index, agents, rowMap, jobs, probes, scans, descendants,
+    emitSettled: (job: SettledEvent['job']) => onSettled?.({ type: 'settled', cause: 'teardown', job }),
     orphan: (owner: Agent) => onSettled?.({ type: 'settled', job: { owner: String(owner.id), detail: 'cancel threw during teardown; work may be orphaned: boom' }, cause: 'teardown' }),
     settled: (cause: string, detail: string | undefined, ownerId: string | undefined) => onSettled?.({ type: 'settled', job: { owner: ownerId, detail }, cause }),
     dispose: () => dispose?.(),
@@ -355,7 +356,7 @@ test('#294：busy/inbox/diagnostic/代际/异常分别给出稳定且脱敏的�
   await check(h, 'job_orphaned')
   h.jobs.length = 0
   h.orphan(h.agents.get('actor')!)
-  await check(h, 'orphan_tombstone')
+  await check(h, 'job_orphaned')
   const bad = harness()
   bad.agents.set('actor', mkAgent('actor', { whenIdle: async () => { throw new Error('secret=never-output https://private.invalid prompt body') } }))
   await check(bad, 'probe_error')
@@ -375,4 +376,86 @@ test('#294：首个 registry 探针抛错也不泄露异常或失去 fail-closed
   const h = harness()
   h.agents.get = () => { throw new Error('secret=never-output https://private.invalid') }
   assert.deepEqual(await h.index.safeToInspect('actor'), { status: 'unsafe', diagnostic: { reasonCode: 'probe_error', type: 'probe', sessionId: 'actor' } })
+})
+
+
+test('#294 P2：真实 orphan settled 事件前后保留同一可定位 job 来源', async () => {
+  const h = harness()
+  h.agents.set('actor', mkAgent('actor'))
+  const job = { id: 'job-orphan-294', owner: 'actor', status: 'failed', detail: 'work may be orphaned: secret=never-output' }
+  h.jobs.push(job)
+  const expected = { status: 'unsafe', diagnostic: { reasonCode: 'job_orphaned', type: 'job', sessionId: 'actor', jobId: job.id, owner: 'actor', state: 'failed' } }
+  assert.deepEqual(await h.index.safeToInspect('actor'), expected)
+  h.emitSettled(job)
+  assert.deepEqual(await h.index.safeToInspect('actor'), expected)
+  h.jobs.length = 0
+  assert.deepEqual(await h.index.safeToInspect('actor'), expected, 'job 行移除不能洗白或丢失已确认的事件来源')
+  h.agents.delete('actor')
+  assert.deepEqual(await h.index.safeToInspect('actor'), expected, '根owner Agent消失仍保留原job来源')
+  assert.doesNotMatch(JSON.stringify(await h.index.safeToInspect('actor')), /never-output|detail/)
+})
+
+
+test('#294 P2：后代 orphan 来源跨 descriptor/Agent/job 消失保留，返回副本不能改缓存', async () => {
+  const h = harness()
+  h.agents.set('actor', mkAgent('actor'))
+  h.agents.set('branch', mkAgent('branch', { parent: 'actor' }))
+  h.agents.set('leaf', mkAgent('leaf', { parent: 'branch' }))
+  h.descendants.set('actor', [{ kind: 'child', id: 'branch', parentId: 'actor', activity: 'running' }, { kind: 'child', id: 'leaf', parentId: 'branch', activity: 'running' }])
+  const job = { id: 'leaf-orphan-job', owner: 'leaf', status: 'failed', detail: 'work may be orphaned: secret=never-output' }
+  h.jobs.push(job)
+  const expected = { status: 'unsafe', diagnostic: { reasonCode: 'job_orphaned', type: 'job', sessionId: 'leaf', jobId: job.id, owner: 'leaf', state: 'failed' } }
+  assert.deepEqual(await h.index.safeToInspect('actor'), expected)
+  h.emitSettled(job)
+  assert.deepEqual(await h.index.safeToInspect('actor'), expected, '祖先诊断指向真正leaf owner，不伪造actor job')
+  h.descendants.clear()
+  h.jobs.length = 0
+  h.agents.delete('leaf')
+  h.agents.delete('branch')
+  assert.deepEqual(await h.index.safeToInspect('leaf'), expected, '真正owner本身消失仍保留原来源')
+  assert.deepEqual(await h.index.safeToInspect('actor'), expected)
+  h.agents.delete('actor')
+  const result = await h.index.safeToInspect('actor')
+  assert.deepEqual(result, expected, '连被检查的Agent也已消失时仍保留已知来源')
+  if (typeof result === 'string') throw new Error('missing diagnostic')
+  result.diagnostic.jobId = 'tampered'
+  result.diagnostic.owner = 'tampered'
+  assert.deepEqual(await h.index.safeToInspect('actor'), expected, '公开结果不可修改缓存来源')
+  h.agents.set('new-session', mkAgent('new-session'))
+  assert.equal(inspectionStatus(await h.index.safeToInspect('new-session')), 'safe', '不污染不同Session/owner')
+})
+
+test('#294 P2：缓存的 orphan 事件来源同样拒绝非法/长/secret标识且不留 raw detail', async () => {
+  for (const id of ['x'.repeat(129), 'ghp_123456789secret', 'https://private.invalid']) {
+    const h = harness()
+    h.agents.set('actor', mkAgent('actor'))
+    h.emitSettled({ id, owner: 'actor', status: 'failed', detail: 'work may be orphaned: secret=never-output' })
+    assert.deepEqual(await h.index.safeToInspect('actor'), { status: 'unsafe', diagnostic: {
+      reasonCode: 'job_orphaned', type: 'job', sessionId: 'actor', owner: 'actor', state: 'failed', identityUnavailable: true,
+    } })
+    const child = harness()
+    child.agents.set(id, mkAgent(id))
+    child.emitSettled({ id: 'safe-job', owner: id, status: 'failed', detail: 'work may be orphaned: secret=never-output' })
+    assert.deepEqual(await child.index.safeToInspect(id), { status: 'unsafe', diagnostic: {
+      reasonCode: 'job_orphaned', type: 'job', jobId: 'safe-job', state: 'failed', identityUnavailable: true,
+    } })
+  }
+})
+test('#294 P2：根第二次 whenIdle await 到达的后代 orphan 不退化为 session_missing', async () => {
+  const h = harness()
+  let idleChecks = 0
+  const job = { id: 'await-orphan-job', owner: 'child', status: 'failed', detail: 'work may be orphaned: secret=never-output' }
+  h.agents.set('actor', mkAgent('actor', { whenIdle: async () => {
+    if (++idleChecks === 2) {
+      h.emitSettled(job)
+      h.agents.delete('child')
+    }
+  } }))
+  h.agents.set('child', mkAgent('child', { parent: 'actor' }))
+  h.descendants.set('actor', [{ kind: 'child', id: 'child', parentId: 'actor', activity: 'running' }])
+  assert.deepEqual(await h.index.safeToInspect('actor'), { status: 'unsafe', diagnostic: {
+    reasonCode: 'job_orphaned', type: 'job', sessionId: 'child', jobId: job.id, owner: 'child', state: 'failed',
+  } })
+  assert.equal(idleChecks, 2)
+  assert.equal(h.agents.has('child'), false)
 })

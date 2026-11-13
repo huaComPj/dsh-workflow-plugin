@@ -400,6 +400,8 @@ GitHub 列表按 `per_page=100` 翻页取全、PR 从 issues 结果中排除；�
   `sessionId` / `dispatchId` / `jobId` / `owner` / `state`。无合法完整标识时省略该键并标记
   `identityUnavailable`，不截断成可操作 ID；不输出异常正文、队列、prompt 或 job detail。
   通知始终附 `executionId`、`visit`、`phase` 与可用 dispatch/claim/Judge ID，即使尚无判定。
+  orphan tombstone 保留 settled 事件时可确认的 job 来源与状态；即使行已消失仍可定位，
+  但这不是 job 当前仍运行的证明。
   `job_active` / `job_orphaned`、代际变化或探针异常仍 fail-closed；预期的已知后代等待不改为 BLOCK。
   诊断仅提示等待、联系原 owner 或核实，不授权自动 resume/kill。确认闭包后仍由 Manager
   显式选择恢复目标；已保存 claim 不等于旧执行已收口。旧行无该可选字段时显示未记录，

@@ -205,7 +205,7 @@ export function makeParticipantIndex(services: ParticipantServices, workOrder: W
   /** 尚未结算的观察；只有它们允许被释放（已确认参与者永不因结算而丢引用）。 */
   const provisional = new Set<string>()
   /** #54：orphan 证据；job 行消失不能洗白。 */
-  const unsafe = new Set<string>()
+  const unsafe = new Map<string, SafetyDiagnostic>()
   /** 已知祖先关系：middle Agent 不可观测、descriptor 消失后仍要能追到父 Role。 */
   const parents = new Map<string, string>()
   let retainDecisions = 0
@@ -234,11 +234,13 @@ export function makeParticipantIndex(services: ParticipantServices, workOrder: W
     if (ownerId === undefined) return
     const owner = exact.get(ownerId) ?? services.agents.get(ownerId)
     if (owner !== undefined) recordParentSession(owner)
+    // 只保存当时的有界来源，不把终态快照当作实时 job 活性证明。
+    const diagnostic = safetyDiagnostic('job_orphaned', 'job', { sessionId: ownerId, jobId: event.job.id, owner: ownerId, state: event.job.status })
     // 保留 owner 与当时已知祖先；descriptor 消失不能洗白父 Role。
     const seen = new Set<string>()
     for (let id: string | undefined = ownerId; id !== undefined && !seen.has(id); id = parents.get(id)) {
       seen.add(id)
-      unsafe.add(id)
+      unsafe.set(id, diagnostic)
       const agent = exact.get(id) ?? services.agents.get(SessionId(id))
       if (agent !== undefined) recordParentSession(agent)
     }
@@ -367,12 +369,13 @@ export function makeParticipantIndex(services: ParticipantServices, workOrder: W
       // 该会话的 turn 结束没有 claim，只说明它在等并行子代理，不是异常闭合。
       let waiting: SafetyDiagnostic | undefined
       const blocked = (reason: SafetyDiagnostic['reasonCode'], type: SafetyDiagnostic['type'], fields: Parameters<typeof safetyDiagnostic>[2] = {}): SafeInspection => ({ status: 'unsafe', diagnostic: safetyDiagnostic(reason, type, { sessionId, ...fields }) })
+      const orphaned = (id: string): SafeInspection => ({ status: 'unsafe', diagnostic: { ...unsafe.get(id)! } })
       // 精确引用优先：宿主自然 dispose 后仍能完成精确收口；同 Session ID 的**另一代**
       // Agent 永远不会被当作这一代的证据（末尾的 `current === candidate` 复查）。
       try {
+        if (unsafe.has(sessionId)) return orphaned(sessionId)
         const agent = exact.get(sessionId) ?? services.agents.get(SessionId(sessionId))
         if (!agent) return blocked('session_missing', 'session')
-        if (unsafe.has(sessionId)) return blocked('orphan_tombstone', 'session')
         await agent.whenIdle()
         const descendants = await services.subagents.listDescendants(SessionId(sessionId))
         const diagnostic = descendants.find(child => child.kind === 'diagnostic')
@@ -380,7 +383,7 @@ export function makeParticipantIndex(services: ParticipantServices, workOrder: W
         for (const child of descendants) parents.set(String(child.id), String(child.parentId))
         const durableIds = new Set([sessionId, ...descendants.map(child => String(child.id))])
         const orphan = [...durableIds].find(id => unsafe.has(id))
-        if (orphan) return blocked('orphan_tombstone', 'descendant', { sessionId: orphan })
+        if (orphan) return orphaned(orphan)
         const requiredIds = new Set([sessionId, ...descendants
           .filter(child => child.kind === 'child' && child.activity === 'running')
           .map(child => String(child.id))])
@@ -403,7 +406,7 @@ export function makeParticipantIndex(services: ParticipantServices, workOrder: W
         for (const id of requiredIds) {
           const candidate = exact.get(id) ?? services.agents.get(SessionId(id))
           if (!candidate) return blocked('session_missing', 'session', { sessionId: id })
-          if (unsafe.has(id)) return blocked('orphan_tombstone', 'session', { sessionId: id })
+          if (unsafe.has(id)) return orphaned(id)
           if (candidate.status !== 'idle' || !inboxEmpty(candidate)) {
             // #54：非 waitable 的 busy 成员（会话自身、tree/exact 补齐的会话、
             // descriptor 发布窗口期的 live 后代）仍属"收口未知"，必须 fail-closed。
@@ -421,7 +424,7 @@ export function makeParticipantIndex(services: ParticipantServices, workOrder: W
         for (const child of currentDescendants) parents.set(String(child.id), String(child.parentId))
         for (const child of currentDescendants) {
           if (child.kind === 'diagnostic') return blocked('descendant_diagnostic', 'descendant', { sessionId: child.id })
-          if (unsafe.has(String(child.id))) return blocked('orphan_tombstone', 'descendant', { sessionId: child.id })
+          if (unsafe.has(String(child.id))) return orphaned(String(child.id))
           if (child.activity === 'running' && !requiredIds.has(String(child.id))) return blocked('descendants_changed', 'descendant', { sessionId: child.id })
         }
         const currentLive = services.agents.list()
@@ -435,7 +438,7 @@ export function makeParticipantIndex(services: ParticipantServices, workOrder: W
           if (current !== undefined && current !== candidate) return blocked('generation_changed', 'session', fields)
           if (candidate.status !== 'idle') return blocked('session_busy', 'session', fields)
           if (!inboxEmpty(candidate)) return blocked('inbox_pending', 'session', fields)
-          if (unsafe.has(candidate.id)) return blocked('orphan_tombstone', 'session', fields)
+          if (unsafe.has(candidate.id)) return orphaned(candidate.id)
           for (const job of services.jobs.list(candidate.id).filter(job => job.owner === candidate.id)) {
             const jobFields = { sessionId: candidate.id, jobId: job.id, owner: job.owner, state: job.status }
             if (!TERMINAL_JOB_STATUSES.has(job.status)) return blocked('job_active', 'job', jobFields)
