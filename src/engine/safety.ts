@@ -39,4 +39,3 @@ export function inspectionDiagnostic(result: SafeInspection, sessionId: string, 
   return { ...safetyDiagnostic(source.reasonCode, source.type, { ...source, dispatchId }), ...(source.identityUnavailable ? { identityUnavailable: true } : {}) }
 }
 export const SAFETY_BLOCK_HINT = '请等待相关活动闭包、联系原 owner 或核实对象状态；诊断不授权自动恢复或终止任务。'
-
